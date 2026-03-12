@@ -1,0 +1,8 @@
+{
+  "chat.useAgentSkills": true,
+  "github.copilot.chat.commitMessageGeneration.instructions": [
+    {
+      "text": "コミットメッセージは、タイトル・本文ともに必ず日本語で生成してください。英語のまま出力しないでください。feat, fix, docs, style, refactor, perf, test, chore 等の適切なプレフィックスを先頭に付与してください。"
+    }
+  ]
+}
