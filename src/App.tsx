@@ -2,25 +2,140 @@ import { useState, useEffect } from 'react'
 import { Settings, MessageSquarePlus, BrainCircuit, Activity, User, Play, Square, Download, X, Eye } from 'lucide-react'
 import { useStore } from './store/useStore'
 import { SettingsModal } from './components/SettingsModal'
+import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from './config/modeMetadata'
+
+function splitReadableLines(text: string): string[] {
+  return text
+    .replace(/。(?=\S)/g, '。\n')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function buildDigestFromContent(content: string): string {
+  const normalized = content.replace(/\s+/g, ' ').trim()
+  const sentences = normalized.match(/[^。！？!?]+[。！？!?]?/g)?.map((sentence) => sentence.trim()).filter(Boolean) ?? []
+
+  if (sentences.length === 0) return normalized
+  if (sentences.length === 1) {
+    return sentences[0].length > 110 ? `${sentences[0].slice(0, 110).trim()}…` : sentences[0]
+  }
+
+  const candidate = `${sentences[0]} ${sentences[1]}`.trim()
+  return candidate.length > 150 ? `${candidate.slice(0, 150).trim()}…` : candidate
+}
+
+function parseConclusionSections(content: string): Array<{ title: string; lines: string[] }> {
+  const normalized = content.replace(/\r/g, '').replace(/(?<!\n)(\d+\.\s)/g, '\n$1').trim()
+  const chunks = normalized.split(/\n(?=\d+\.\s)/).map((chunk) => chunk.trim()).filter(Boolean)
+
+  if (chunks.length <= 1) {
+    return [{ title: '総括', lines: splitReadableLines(normalized) }]
+  }
+
+  return chunks.map((chunk) => {
+    const match = chunk.match(/^(\d+\.\s*[^:\n：]+)(?:[:：]\s*(.*))?$/)
+    if (match) {
+      const inlineBody = match[2] ? splitReadableLines(match[2]) : []
+      return {
+        title: match[1].trim(),
+        lines: inlineBody.length > 0 ? inlineBody : []
+      }
+    }
+
+    const [title, ...rest] = chunk.split('\n')
+    return {
+      title: title.trim(),
+      lines: splitReadableLines(rest.join('\n'))
+    }
+  }).map((section) => ({
+    title: section.title,
+    lines: section.lines.length > 0 ? section.lines : splitReadableLines(chunks.find((chunk) => chunk.startsWith(section.title))?.replace(section.title, '').trim() ?? '')
+  }))
+}
+
+function getAgentAliases(agent: { name: string; role: string }): string[] {
+  const aliases = new Set<string>([agent.name])
+  const match = agent.name.match(/エージェント([A-ZＡ-Ｚ])/)
+  if (match) {
+    const letter = match[1].replace(/[Ａ-Ｚ]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
+    aliases.add(`${letter}さん`)
+    aliases.add(letter)
+  }
+  if (agent.role === 'Facilitator' || agent.name.includes('ファシリテーター')) {
+    aliases.add('ファシリテーター')
+    aliases.add('司会')
+    aliases.add('進行役')
+  }
+  return [...aliases].sort((left, right) => right.length - left.length)
+}
+
+function findReferencedMessages(
+  content: string,
+  currentMessageId: string,
+  allMessages: Array<{ id: string; agentId: string; summary: string; timestamp: number }>,
+  agents: Array<{ id: string; name: string; role: string }>
+): Array<{ messageId: string; label: string; summary: string }> {
+  const currentMessage = allMessages.find((message) => message.id === currentMessageId)
+  if (!currentMessage) return []
+
+  const previousMessages = allMessages.filter((message) => message.timestamp <= currentMessage.timestamp && message.id !== currentMessage.id)
+  const ordinalMatch = content.match(/(\d+)回目の発言/)
+  const references: Array<{ messageId: string; label: string; summary: string }> = []
+
+  agents.forEach((agent) => {
+    if (agent.id === currentMessage.agentId) return
+    const aliases = getAgentAliases(agent)
+    const isMentioned = aliases.some((alias) => alias.length > 1 && content.includes(alias))
+    if (!isMentioned) return
+
+    const agentMessages = previousMessages.filter((message) => message.agentId === agent.id)
+    if (agentMessages.length === 0) return
+
+    let targetMessage = ordinalMatch ? agentMessages[Number(ordinalMatch[1]) - 1] : undefined
+    if (!targetMessage) {
+      targetMessage = agentMessages[agentMessages.length - 1]
+    }
+    if (!targetMessage) return
+
+    const localOrder = agentMessages.findIndex((message) => message.id === targetMessage.id) + 1
+    if (references.some((entry) => entry.messageId === targetMessage.id)) return
+    references.push({
+      messageId: targetMessage.id,
+      label: `${agent.name} ${localOrder}回目`,
+      summary: targetMessage.summary
+    })
+  })
+
+  return references
+}
+
+function scrollToMessage(messageId: string): void {
+  document.getElementById(`message-${messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 
 function App() {
   const { 
-    agents, topic, sessionStatus, startSession, stopSession, messages, currentTurn, processNextTurn, finalConclusion, sessionMode, sessionError, clearSessionError, orchestrationDebug, backendSessionId
+    agents, topic, sessionStatus, startSession, stopSession, resetSession, messages, currentTurn, processNextTurn, finalConclusion, executionMode, discussionStyle, sessionError, clearSessionError, orchestrationDebug, backendSessionId
   } = useStore()
 
-  const sessionModeLabel = sessionMode === 'conversation' ? 'Conversation モード' : 'Meeting モード'
-  const sessionModeDescription = sessionMode === 'conversation'
-    ? '2名が交互に意見を返し合う対話向け'
-    : '挙手と進行役を使う多人数の会議向け'
-  const sessionModePanelClass = sessionMode === 'conversation'
+  const executionModeInfo = EXECUTION_MODE_METADATA[executionMode]
+  const executionModePanelClass = executionMode === 'orchestration'
+    ? 'border-emerald-500/20 bg-emerald-500/10'
+    : 'border-slate-700/50 bg-slate-900/30'
+  const executionModeLabelClass = executionMode === 'orchestration' ? 'text-emerald-400' : 'text-slate-400'
+  const discussionStyleInfo = DISCUSSION_STYLE_METADATA[discussionStyle]
+  const discussionStylePanelClass = discussionStyle === 'conversation'
     ? 'border-cyan-500/20 bg-cyan-500/10'
     : 'border-amber-500/20 bg-amber-500/10'
-  const sessionModeLabelClass = sessionMode === 'conversation' ? 'text-cyan-400' : 'text-amber-400'
+  const discussionStyleLabelClass = discussionStyle === 'conversation' ? 'text-cyan-400' : 'text-amber-400'
 
   const [localTopic, setLocalTopic] = useState(topic)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [summaryModal, setSummaryModal] = useState<{ agentName: string; content: string } | null>(null)
   const [isDebugOpen, setIsDebugOpen] = useState(false)
+  const orderedMessages = [...messages].sort((left, right) => left.timestamp - right.timestamp)
+  const conclusionSections = finalConclusion && finalConclusion !== '生成中...' ? parseConclusionSections(finalConclusion) : []
 
   // 議論ループの制御
   useEffect(() => {
@@ -34,19 +149,40 @@ function App() {
     startSession(localTopic);
   }
 
+  const handleNewSession = () => {
+    resetSession()
+    setLocalTopic('')
+    setSummaryModal(null)
+    setIsDebugOpen(false)
+  }
+
   // MDファイルのダウンロード
   const handleDownloadMd = () => {
     const now = new Date();
     const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
     
-    let md = `# Turtle Brain 議論レポート\n\n`;
+    let md = `# Turtle Brain 会議サマリ\n\n`;
     md += `**テーマ:** ${topic}\n`;
     md += `**日時:** ${dateStr}\n`;
     md += `**参加エージェント:** ${agents.map(a => `${a.name}（${a.stance}）`).join('、')}\n\n`;
     md += `---\n\n`;
 
-    // 各エージェントの発言
-    md += `## 議論内容\n\n`;
+    if (finalConclusion && finalConclusion !== '生成中...') {
+      md += `## 総括\n\n`;
+      md += `${finalConclusion}\n\n`;
+    }
+
+    md += `## 各エージェントの発言ダイジェスト\n\n`;
+    agents.forEach(agent => {
+      const agentMsgs = messages.filter(m => m.agentId === agent.id);
+      md += `### ${agent.name}（${agent.stance}・${agent.personality}）\n\n`;
+      agentMsgs.forEach((msg, idx) => {
+        md += `- ${idx + 1}回目: ${buildDigestFromContent(msg.content)}\n`;
+      });
+      md += `\n`;
+    });
+
+    md += `## 各エージェントの詳細発言\n\n`;
     agents.forEach(agent => {
       const agentMsgs = messages.filter(m => m.agentId === agent.id);
       md += `### ${agent.name}（${agent.stance}・${agent.personality}）\n\n`;
@@ -58,17 +194,11 @@ function App() {
 
     // 時系列の対話ログ
     md += `---\n\n## 対話ログ（時系列）\n\n`;
-    messages.forEach((msg, idx) => {
+    orderedMessages.forEach((msg, idx) => {
       const ag = agents.find(a => a.id === msg.agentId);
       md += `**${idx + 1}. ${ag?.name || 'Unknown'}:**\n`;
       md += `${msg.content}\n\n`;
     });
-
-    // 最終結論
-    if (finalConclusion && finalConclusion !== '生成中...') {
-      md += `---\n\n## 最終結論\n\n`;
-      md += `${finalConclusion}\n`;
-    }
 
     const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -119,6 +249,7 @@ function App() {
               Actions
             </h2>
             <button 
+              onClick={handleNewSession}
               className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium transition-all shadow-lg shadow-cyan-500/20"
             >
               <MessageSquarePlus size={18} />
@@ -134,57 +265,66 @@ function App() {
           </div>
 
           <div className="space-y-4">
-            <div className={`rounded-xl border p-3 ${sessionModePanelClass}`}>
+            <div className={`rounded-xl border p-3 ${executionModePanelClass}`}>
               <div className="flex items-center justify-between gap-2">
-                <p className={`text-xs font-semibold uppercase tracking-wider ${sessionModeLabelClass}`}>Session Mode</p>
+                <p className={`text-xs font-semibold tracking-wider ${executionModeLabelClass}`}>実行モード</p>
+                <span className="rounded-md border border-slate-700/60 px-2 py-1 text-[10px] text-slate-500">{EXECUTION_MODE_METADATA.autonomous.badge}</span>
+              </div>
+              <p className="mt-2 text-sm font-medium text-slate-200">{executionModeInfo.label}</p>
+              <p className="mt-1 text-xs text-slate-400">{executionModeInfo.shortDescription}</p>
+            </div>
+
+            <div className={`rounded-xl border p-3 ${discussionStylePanelClass}`}>
+              <div className="flex items-center justify-between gap-2">
+                <p className={`text-xs font-semibold tracking-wider ${discussionStyleLabelClass}`}>ディスカッションスタイル</p>
                 <button
                   onClick={() => setIsDebugOpen((open) => !open)}
                   className="rounded-md border border-slate-700/60 px-2 py-1 text-[10px] text-slate-400 hover:border-slate-500 hover:text-slate-200"
                 >
-                  {isDebugOpen ? '診断を閉じる' : '診断'}
+                  {isDebugOpen ? '詳細を閉じる' : '詳細'}
                 </button>
               </div>
-              <p className="mt-2 text-sm font-medium text-slate-200">{sessionModeLabel}</p>
-              <p className="mt-1 text-xs text-slate-400">{sessionModeDescription}</p>
+              <p className="mt-2 text-sm font-medium text-slate-200">{discussionStyleInfo.label}</p>
+              <p className="mt-1 text-xs text-slate-400">{discussionStyleInfo.shortDescription}</p>
             </div>
 
             {isDebugOpen && (
-              <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3 text-xs text-slate-300 space-y-3">
+              <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-4 text-sm text-slate-300 space-y-4">
                 <div>
-                  <p className="font-semibold text-slate-200">Diagnostics</p>
-                  <p className="mt-1 text-slate-500">内部状態の観測用です。UIを壊さない範囲で会議オーケストレーターの動きを表示しています。</p>
+                  <p className="font-semibold text-slate-100">内部状態</p>
+                  <p className="mt-1 text-slate-400">裏側で誰が選ばれたか、何を受け取っているか、どの worker が動いたかを確認できます。</p>
                 </div>
 
                 <div className="space-y-1">
-                  <p className="text-slate-500">フロント保持 Session ID</p>
-                  <p className="font-mono text-[11px] text-slate-200 break-all">{backendSessionId ?? '未開始'}</p>
+                  <p className="text-slate-400">フロント保持 Session ID</p>
+                  <p className="font-mono text-xs text-slate-100 break-all">{backendSessionId ?? '未開始'}</p>
                 </div>
 
                 {orchestrationDebug ? (
                   <>
                     <div className="space-y-1">
-                      <p className="text-slate-500">最新ディスパッチ</p>
-                      <p className="text-slate-200">{orchestrationDebug.dispatchReason}</p>
+                      <p className="text-slate-400">最新ディスパッチ</p>
+                      <p className="text-slate-100 leading-6">{orchestrationDebug.dispatchReason}</p>
                     </div>
 
                     {orchestrationDebug.facilitator && (
                       <div className="space-y-1">
-                        <p className="text-slate-500">ファシリテーター判断</p>
-                        <p className="text-slate-200">整理: {orchestrationDebug.facilitator.overview}</p>
-                        <p className="text-slate-400">理由: {orchestrationDebug.facilitator.rationale}</p>
-                        <p className="text-slate-400">次の焦点: {orchestrationDebug.facilitator.nextFocus}</p>
+                        <p className="text-slate-400">ファシリテーター判断</p>
+                        <p className="text-slate-100">整理: {orchestrationDebug.facilitator.overview}</p>
+                        <p className="text-slate-300">理由: {orchestrationDebug.facilitator.rationale}</p>
+                        <p className="text-slate-300">次の焦点: {orchestrationDebug.facilitator.nextFocus}</p>
                       </div>
                     )}
 
                     <div className="space-y-1">
-                      <p className="text-slate-500">挙手判定</p>
+                      <p className="text-slate-400">発言強度判定</p>
                       <div className="space-y-2">
                         {orchestrationDebug.scores.map((score) => {
                           const agent = agents.find((entry) => entry.id === score.agentId)
                           return (
                             <div key={score.agentId} className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-2">
-                              <p className="text-slate-200">{agent?.name ?? score.agentId}: {score.score} / {score.confidence}</p>
-                              <p className="text-slate-400">{score.desiredAction} - {score.reason}</p>
+                              <p className="text-slate-100">{agent?.name ?? score.agentId}: {score.score} / {score.confidence}</p>
+                              <p className="text-slate-300">{score.desiredAction} - {score.reason}</p>
                             </div>
                           )
                         })}
@@ -192,23 +332,23 @@ function App() {
                     </div>
 
                     <div className="space-y-1">
-                      <p className="text-slate-500">Worker 実行</p>
+                      <p className="text-slate-400">Worker 実行</p>
                       <div className="space-y-1">
                         {orchestrationDebug.workers.map((worker) => (
-                          <p key={worker.workerId} className="text-slate-400">{worker.kind} / {worker.targetAgentId ?? 'system'} / {worker.durationMs}ms</p>
+                          <p key={worker.workerId} className="text-slate-300">{worker.kind} / {worker.targetAgentId ?? 'system'} / {worker.durationMs}ms</p>
                         ))}
                       </div>
                     </div>
 
                     <div className="space-y-1">
-                      <p className="text-slate-500">Agent Session / Mailbox</p>
+                      <p className="text-slate-400">Agent Session / Mailbox</p>
                       <div className="space-y-1">
                         {orchestrationDebug.agentSessions.map((entry) => {
                           const agent = agents.find((item) => item.id === entry.agentId)
                           return (
-                            <div key={entry.agentId} className="text-slate-400">
-                              <p>{agent?.name ?? entry.agentId}</p>
-                              <p className="font-mono text-[10px] break-all">sid: {entry.runtimeSessionId ?? 'none'}</p>
+                            <div key={entry.agentId} className="text-slate-300">
+                              <p className="text-slate-100">{agent?.name ?? entry.agentId}</p>
+                              <p className="font-mono text-xs break-all">sid: {entry.runtimeSessionId ?? 'none'}</p>
                               <p>inbox {entry.inboxCount} / outbox {entry.outboxCount}</p>
                             </div>
                           )
@@ -217,7 +357,7 @@ function App() {
                     </div>
                   </>
                 ) : (
-                  <p className="text-slate-500">まだ会議オーケストレーターの実行ログはありません。</p>
+                  <p className="text-slate-400">まだ内部状態はありません。セッション開始後に進行の詳細が表示されます。</p>
                 )}
               </div>
             )}
@@ -227,14 +367,14 @@ function App() {
             </h2>
             <div className="space-y-2">
               {agents.map(a => (
-                <div key={a.id} className="p-3 rounded-lg bg-slate-800/50 border border-slate-700/50">
+                <div key={a.id} className="p-3.5 rounded-lg bg-slate-800/50 border border-slate-700/50">
                   <div className="flex items-start gap-2">
-                    <User size={16} className={a.role === 'Facilitator' ? 'text-amber-400' : 'text-cyan-400'} />
+                    <User size={18} className={a.role === 'Facilitator' ? 'text-amber-400' : 'text-cyan-400'} />
                     <div>
-                      <p className="text-sm font-medium text-slate-200">{a.name}</p>
-                      <p className="text-xs text-slate-500">{a.role}</p>
-                      <p className="mt-1 text-xs text-slate-400">スタンス: {a.stance}</p>
-                      <p className="mt-1 text-xs text-slate-400">性格: {a.personality}</p>
+                      <p className="text-base font-semibold text-slate-100 leading-snug">{a.name}</p>
+                      <p className="text-sm text-slate-500">{a.role}</p>
+                      <p className="mt-1.5 text-sm text-slate-300">スタンス: {a.stance}</p>
+                      <p className="mt-1 text-sm text-slate-300">性格: {a.personality}</p>
                     </div>
                   </div>
                 </div>
@@ -312,7 +452,7 @@ function App() {
               </div>
             </div>
           ) : (
-            <div className="flex-1 flex gap-4 pb-2 overflow-x-auto overflow-y-hidden">
+            <div className="flex-1 flex justify-center gap-4 pb-2 overflow-x-auto overflow-y-hidden">
               {agents.map(agent => {
                 const isFacilitator = agent.role === 'Facilitator';
                 const accentColor = isFacilitator ? 'amber' : 'cyan';
@@ -327,7 +467,7 @@ function App() {
                   <div className={`p-4 border-b border-slate-700/50 ${
                     isFacilitator ? 'bg-amber-900/20' : 'bg-slate-800/80'
                   }`}>
-                    <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-start justify-between mb-3 gap-3">
                       <div className="flex items-center gap-2">
                         <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
                           agent.role === 'Facilitator' ? 'bg-amber-500/20 text-amber-400' : 'bg-cyan-500/20 text-cyan-400'
@@ -339,43 +479,45 @@ function App() {
                           <span className="text-sm text-slate-400">{agent.role}</span>
                         </div>
                       </div>
-                      
-                      {/* ステータスインジケーター */}
-                      {sessionStatus === 'running' && (
-                        <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-700/50 text-sm font-medium text-slate-300 border border-slate-600/50`}>
-                          <Activity size={12} className={
-                            agent.status === 'thinking' ? `text-${accentColor}-400 animate-pulse` :
-                            agent.status === 'raising_hand' ? 'text-yellow-400 animate-pulse' :
-                            'text-slate-500'
-                          } />
-                          {agent.status === 'thinking' ? '思考中...' :
-                           agent.status === 'raising_hand' ? '挙手判定...' :
-                           '待機中'}
-                        </div>
-                      )}
+
+                      <div className="flex flex-col items-end gap-2 shrink-0">
+                        {agent.speakCount > 0 && (
+                          <span className="px-3 py-1.5 rounded bg-cyan-900/30 border border-cyan-700/50 text-sm font-medium text-cyan-200">
+                            発言: {agent.speakCount}回
+                          </span>
+                        )}
+
+                        {sessionStatus === 'running' && (
+                          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-700/50 text-sm font-medium text-slate-300 border border-slate-600/50`}>
+                            <Activity size={12} className={
+                              agent.status === 'thinking' ? `text-${accentColor}-400 animate-pulse` :
+                              agent.status === 'raising_hand' ? 'text-yellow-400 animate-pulse' :
+                              'text-slate-500'
+                            } />
+                            {agent.status === 'thinking' ? '思考中...' :
+                             agent.status === 'raising_hand' ? '発言強度を判定中...' :
+                             '待機中'}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     
                     {/* プロパティ（スタンス・性格等） */}
-                    <div className="flex flex-wrap gap-2">
-                      <span className="px-2.5 py-1.5 rounded bg-slate-900/50 border border-slate-700/50 text-xs font-medium text-slate-300">
-                        {agent.stance}
+                    <div className="grid grid-cols-2 gap-2">
+                      <span className="flex h-[64px] items-center justify-center overflow-hidden px-3 py-2.5 rounded bg-slate-900/50 border border-slate-700/50 text-center text-[15px] font-medium leading-6 text-slate-200">
+                        <span className="line-clamp-2">{agent.stance}</span>
                       </span>
-                      <span className="px-2.5 py-1.5 rounded bg-slate-900/50 border border-slate-700/50 text-xs font-medium text-slate-300">
-                        {agent.personality}
+                      <span className="flex h-[64px] items-center justify-center overflow-hidden px-3 py-2.5 rounded bg-slate-900/50 border border-slate-700/50 text-center text-[15px] font-medium leading-6 text-slate-200">
+                        <span className="line-clamp-2">{agent.personality}</span>
                       </span>
-                      {agent.speakCount > 0 && (
-                        <span className="px-2.5 py-1.5 rounded bg-cyan-900/30 border border-cyan-700/50 text-xs font-medium text-cyan-300">
-                          発言: {agent.speakCount}回
-                        </span>
-                      )}
                     </div>
 
-                    {/* 挙手強度バー */}
+                    {/* 発言強度バー */}
                     <div className="mt-3 h-11">
                       <div className={`h-full rounded-lg border border-slate-700/40 bg-slate-900/20 px-3 py-2 transition-opacity ${sessionStatus === 'running' ? 'opacity-100' : 'opacity-55'}`}>
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-medium text-slate-400">挙手強度</span>
-                          <span className="text-xs text-slate-300 font-mono">{sessionStatus === 'running' ? agent.handRaiseIntensity : '--'}</span>
+                          <span className="text-sm font-medium text-slate-300">発言強度</span>
+                          <span className="text-sm text-slate-200 font-mono">{sessionStatus === 'running' ? agent.handRaiseIntensity : '--'}</span>
                         </div>
                         <div className="h-2 bg-slate-700/50 rounded-full overflow-hidden">
                           <div 
@@ -395,35 +537,80 @@ function App() {
                   <button
                     onClick={() => latestMsg && setSummaryModal({ agentName: agent.name, content: latestMsg.content })}
                     disabled={!latestMsg}
-                    className="w-full h-24 text-left px-4 py-3 bg-gradient-to-r from-cyan-900/20 to-blue-900/20 border-b border-slate-700/50 hover:from-cyan-900/30 hover:to-blue-900/30 transition-colors group disabled:cursor-default disabled:hover:from-cyan-900/20 disabled:hover:to-blue-900/20"
+                    className="w-full h-28 text-left px-4 py-3 bg-gradient-to-r from-cyan-900/20 to-blue-900/20 border-b border-slate-700/50 hover:from-cyan-900/30 hover:to-blue-900/30 transition-colors group disabled:cursor-default disabled:hover:from-cyan-900/20 disabled:hover:to-blue-900/20"
                   >
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">現在の主張</p>
                       <Eye size={14} className="text-slate-500 group-hover:text-cyan-400 transition-colors" />
                     </div>
-                    <p className="text-sm text-slate-200 leading-6 line-clamp-2">
+                    <p className="text-[15px] text-slate-100 leading-7 line-clamp-2">
                       {latestMsg ? latestMsg.summary : 'まだ発言はありません。議論が始まるとここに現在の主張が表示されます。'}
                     </p>
                   </button>
 
+                  <div className="px-3 py-2 border-b border-slate-700/30 bg-slate-900/20">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-slate-300">発言履歴</p>
+                      {agentMessages.length > 0 ? (
+                        <div className="flex flex-wrap justify-end gap-1.5">
+                          {agentMessages.map((msg, idx) => (
+                            <button
+                              key={`${msg.id}-jump`}
+                              onClick={() => scrollToMessage(msg.id)}
+                              className="rounded-md border border-slate-700/60 px-2 py-1 text-xs font-medium text-slate-300 hover:border-cyan-500/60 hover:text-cyan-300"
+                            >
+                              {idx + 1}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-slate-500">まだ発言はありません</p>
+                      )}
+                    </div>
+                  </div>
+
                   {/* チャットログエリア */}
                   <div className="flex-1 overflow-y-auto p-3 space-y-3">
-                    {agentMessages.map((msg, idx) => (
-                      <div key={msg.id} className={`border rounded-xl p-3 ${
-                        isFacilitator 
-                          ? 'bg-amber-900/10 border-amber-700/30' 
-                          : 'bg-slate-700/30 border-slate-600/30'
-                      }`}>
-                        <p className={`text-xs mb-2 font-medium ${
-                          isFacilitator ? 'text-amber-500' : 'text-slate-500'
+                    {agentMessages.map((msg, idx) => {
+                      const globalOrder = orderedMessages.findIndex((entry) => entry.id === msg.id) + 1
+                      const references = findReferencedMessages(msg.content, msg.id, orderedMessages, agents)
+                      return (
+                        <div id={`message-${msg.id}`} key={msg.id} className={`border rounded-xl p-3 ${
+                          isFacilitator 
+                            ? 'bg-amber-900/10 border-amber-700/30' 
+                            : 'bg-slate-700/30 border-slate-600/30'
                         }`}>
-                          {isFacilitator ? '介入' : `${idx + 1}回目の発言`}
-                        </p>
-                        <p className="text-base text-slate-200 leading-7 whitespace-pre-wrap">
-                          {msg.content}
-                        </p>
-                      </div>
-                    ))}
+                          <div className="mb-2 flex items-center justify-between gap-3">
+                            <p className={`text-sm font-semibold ${
+                              isFacilitator ? 'text-amber-400' : 'text-slate-300'
+                            }`}>
+                              {isFacilitator ? `${idx + 1}回目の進行` : `${idx + 1}回目の発言`}
+                            </p>
+                            <p className="text-sm text-slate-400">全体 {globalOrder} 番目</p>
+                          </div>
+                          <p className="text-base text-slate-200 leading-7 whitespace-pre-wrap">
+                            {msg.content}
+                          </p>
+                          {references.length > 0 && (
+                            <div className="mt-3 space-y-2">
+                              <p className="text-xs font-medium text-slate-400">参照している発言</p>
+                              <div className="flex flex-wrap gap-2">
+                                {references.map((reference) => (
+                                  <button
+                                    key={reference.messageId}
+                                    onClick={() => scrollToMessage(reference.messageId)}
+                                    className="rounded-lg border border-cyan-700/40 bg-cyan-900/20 px-2.5 py-1.5 text-xs text-cyan-200 hover:bg-cyan-900/30"
+                                    title={reference.summary}
+                                  >
+                                    {reference.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
                     {/* 思考中・挙手判定中の演出 */}
                     {(agent.status === 'thinking' || agent.status === 'raising_hand') && (
                       <div className="flex gap-1 items-center px-4 py-3 opacity-50">
@@ -457,9 +644,26 @@ function App() {
                   </button>
                 )}
               </div>
-              <div className="text-slate-200 whitespace-pre-wrap text-sm leading-relaxed">
-                {finalConclusion}
-              </div>
+              {finalConclusion === '生成中...' ? (
+                <div className="text-slate-200 whitespace-pre-wrap text-base leading-7">
+                  {finalConclusion}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {conclusionSections.map((section) => (
+                    <section key={section.title} className="rounded-xl border border-slate-700/40 bg-slate-900/20 p-4">
+                      <h4 className="text-lg font-semibold text-slate-100">{section.title}</h4>
+                      <div className="mt-3 space-y-2">
+                        {section.lines.map((line, index) => (
+                          <p key={`${section.title}-${index}`} className="text-base leading-7 text-slate-200">
+                            {line}
+                          </p>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

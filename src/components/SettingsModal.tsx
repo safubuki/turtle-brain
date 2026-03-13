@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X, Plus, Trash2, ChevronDown, RotateCcw } from 'lucide-react';
 import { useStore, type AgentProfile } from '../store/useStore';
+import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from '../config/modeMetadata';
 
 // スタンスのプリセット一覧
 const STANCE_PRESETS = [
@@ -44,10 +45,11 @@ interface PresetPanelProps {
   onClose: () => void;
   customValue: string;
   onCustomChange: (value: string) => void;
+  onCustomCommit: () => void;
   accentColor: 'cyan' | 'amber';
 }
 
-function PresetPanel({ title, presets, selectedValues, onToggle, onClose, customValue, onCustomChange, accentColor }: PresetPanelProps) {
+function PresetPanel({ title, presets, selectedValues, onToggle, onClose, customValue, onCustomChange, onCustomCommit, accentColor }: PresetPanelProps) {
   const colorClasses = accentColor === 'amber' 
     ? { selected: 'bg-amber-500/20 border-amber-500/50 text-amber-300', hover: 'hover:border-amber-500/30' }
     : { selected: 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300', hover: 'hover:border-cyan-500/30' };
@@ -84,13 +86,29 @@ function PresetPanel({ title, presets, selectedValues, onToggle, onClose, custom
           );
         })}
       </div>
-      <input
-        type="text"
-        value={customValue}
-        onChange={(e) => onCustomChange(e.target.value)}
-        placeholder="追加ニュアンス（任意）例: 少し皮肉を交えて"
-        className="w-full bg-slate-800/50 border border-slate-600/50 rounded-lg px-4 py-3 text-sm text-slate-200 focus:border-cyan-500 outline-none placeholder:text-sm placeholder:text-slate-500"
-      />
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={customValue}
+          onChange={(e) => onCustomChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              onCustomCommit();
+            }
+          }}
+          placeholder="追加ニュアンス（任意）例: 少し皮肉を交えて"
+          className="flex-1 bg-slate-800/50 border border-slate-600/50 rounded-lg px-4 py-3 text-sm text-slate-200 focus:border-cyan-500 outline-none placeholder:text-sm placeholder:text-slate-500"
+        />
+        <button
+          type="button"
+          onClick={onCustomCommit}
+          disabled={!customValue.trim()}
+          className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-3 text-sm font-semibold text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/50 disabled:text-slate-500"
+        >
+          追加
+        </button>
+      </div>
     </div>
   );
 }
@@ -101,14 +119,51 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const { agents, addAgent, updateAgent, removeAgent, resetAgentsToDefault, resetAgentToDefault, turnLimit, setTurnLimit, handRaiseMode, setHandRaiseMode, environment, sessionMode, setSessionMode } = useStore();
-  const isConversationMode = sessionMode === 'conversation';
-  const sessionModeDescription = isConversationMode
-    ? '対話モードでは2名が交互に応答します。挙手判定やファシリテーターは使わず、相手の発言を受けて会話を深める設定です。'
-    : 'Meeting モードでは複数エージェントが会議形式で議論します。挙手判定、進行役、スタンスや性格による振る舞いの違いを活かす設定です。';
+  const { agents, addAgent, updateAgent, removeAgent, resetAgentsToDefault, resetAgentToDefault, turnLimit, setTurnLimit, handRaiseMode, setHandRaiseMode, environment, executionMode, setExecutionMode, discussionStyle, setDiscussionStyle } = useStore();
+  const isConversationMode = discussionStyle === 'conversation';
+  const executionModeInfo = EXECUTION_MODE_METADATA[executionMode];
+  const discussionStyleInfo = DISCUSSION_STYLE_METADATA[discussionStyle];
+  const [customInputs, setCustomInputs] = useState<Record<string, string>>({});
   
   // プリセットパネルの開閉状態（agentId => 'stance' | 'personality' | null）
   const [openPanel, setOpenPanel] = useState<{ agentId: string; type: 'stance' | 'personality' } | null>(null);
+
+  const getCustomInputKey = (agentId: string, field: 'stance' | 'personality') => `${agentId}:${field}`;
+
+  const setCustomInputValue = (agentId: string, field: 'stance' | 'personality', value: string) => {
+    const key = getCustomInputKey(agentId, field);
+    setCustomInputs((current) => ({ ...current, [key]: value }));
+  };
+
+  const clearCustomInputValue = (agentId: string, field: 'stance' | 'personality') => {
+    const key = getCustomInputKey(agentId, field);
+    setCustomInputs((current) => ({ ...current, [key]: '' }));
+  };
+
+  const getCustomInputValue = (agentId: string, field: 'stance' | 'personality') => {
+    return customInputs[getCustomInputKey(agentId, field)] ?? '';
+  };
+
+  const parseAttributeParts = (value: string): string[] => {
+    return value
+      .split('・')
+      .map((part) => part.trim())
+      .filter((part) => part && part !== '未設定');
+  };
+
+  const mergeAttributeValue = (currentValue: string, nextValue: string): string => {
+    const trimmedValue = nextValue.trim();
+    if (!trimmedValue) {
+      return currentValue;
+    }
+
+    const currentParts = parseAttributeParts(currentValue);
+    if (currentParts.includes(trimmedValue)) {
+      return currentParts.join('・') || '未設定';
+    }
+
+    return [...currentParts, trimmedValue].join('・');
+  };
 
   const handleAddAgent = () => {
     if (isConversationMode) return;
@@ -128,9 +183,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     addAgent(newAgent);
   };
 
-  const handleSessionModeChange = (mode: 'conversation' | 'meeting') => {
+  const handleDiscussionStyleChange = (style: 'conversation' | 'meeting') => {
     setOpenPanel(null);
-    setSessionMode(mode);
+    setDiscussionStyle(style);
   };
 
   // プリセットのトグル処理
@@ -139,7 +194,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     if (!agent) return;
     
     const currentValue = agent[field];
-    const currentParts = currentValue.split('・').map(s => s.trim()).filter(Boolean);
+    const currentParts = parseAttributeParts(currentValue);
     
     if (currentParts.includes(label)) {
       // 既に選択済み → 削除
@@ -152,9 +207,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   };
 
+  const handleCustomValueCommit = (agentId: string, field: 'stance' | 'personality') => {
+    const agent = agents.find((entry) => entry.id === agentId);
+    const draftValue = getCustomInputValue(agentId, field);
+    if (!agent || !draftValue.trim()) return;
+
+    updateAgent(agentId, { [field]: mergeAttributeValue(agent[field], draftValue) });
+    clearCustomInputValue(agentId, field);
+  };
+
   // 現在のフィールド値から選択中のプリセットを抽出
   const getSelectedPresets = (value: string): string[] => {
-    return value.split('・').map(s => s.trim()).filter(Boolean);
+    return parseAttributeParts(value);
   };
 
   if (!isOpen) return null;
@@ -178,29 +242,61 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           <section className="space-y-4">
             <h3 className="text-sm font-semibold text-cyan-400 uppercase tracking-wider">Session Settings</h3>
             <div className="space-y-2">
-              <label className="text-sm text-slate-400">セッションモード</label>
+              <label className="text-sm text-slate-400">実行モード</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
-                  onClick={() => handleSessionModeChange('conversation')}
+                  onClick={() => setExecutionMode('orchestration')}
+                  className={`rounded-xl border px-4 py-3 text-left transition-all ${
+                    executionMode === 'orchestration'
+                      ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                      : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
+                  }`}
+                >
+                  <p className="font-semibold">{EXECUTION_MODE_METADATA.orchestration.label}</p>
+                  <p className="mt-1 text-xs opacity-75">{EXECUTION_MODE_METADATA.orchestration.shortDescription}</p>
+                </button>
+                <button
+                  type="button"
+                  disabled
+                  aria-disabled="true"
+                  className="cursor-not-allowed rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3 text-left text-slate-500 opacity-60"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold">{EXECUTION_MODE_METADATA.autonomous.label}</p>
+                    <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] tracking-wider text-slate-500">{EXECUTION_MODE_METADATA.autonomous.badge}</span>
+                  </div>
+                  <p className="mt-1 text-xs opacity-75">{EXECUTION_MODE_METADATA.autonomous.shortDescription}</p>
+                </button>
+              </div>
+              <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-slate-300">
+                {executionModeInfo.longDescription}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm text-slate-400">ディスカッションスタイル</label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => handleDiscussionStyleChange('conversation')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
                     isConversationMode
                       ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
                       : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
                   }`}
                 >
-                  <p className="font-semibold">Conversation モード</p>
-                  <p className="mt-1 text-xs opacity-75">2人で交互に聞き合いながら対話する</p>
+                  <p className="font-semibold">{DISCUSSION_STYLE_METADATA.conversation.label}</p>
+                  <p className="mt-1 text-xs opacity-75">{DISCUSSION_STYLE_METADATA.conversation.shortDescription}</p>
                 </button>
                 <button
-                  onClick={() => handleSessionModeChange('meeting')}
+                  onClick={() => handleDiscussionStyleChange('meeting')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
-                    sessionMode === 'meeting'
+                    discussionStyle === 'meeting'
                       ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
                       : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
                   }`}
                 >
-                  <p className="font-semibold">Meeting モード</p>
-                  <p className="mt-1 text-xs opacity-75">挙手・進行役・性格差が効く会議向け</p>
+                  <p className="font-semibold">{DISCUSSION_STYLE_METADATA.meeting.label}</p>
+                  <p className="mt-1 text-xs opacity-75">{DISCUSSION_STYLE_METADATA.meeting.shortDescription}</p>
                 </button>
               </div>
               <div className={`rounded-xl border px-4 py-3 text-sm ${
@@ -208,7 +304,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   ? 'border-cyan-500/20 bg-cyan-500/10 text-slate-300'
                   : 'border-amber-500/20 bg-amber-500/10 text-slate-300'
               }`}>
-                {sessionModeDescription}
+                {discussionStyleInfo.longDescription}
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -322,21 +418,21 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     
                     <div className="grid grid-cols-2 gap-4 mr-8">
                       <div className="space-y-1.5">
-                        <label className="text-xs text-slate-500">エージェント名</label>
+                        <label className="text-sm font-medium text-slate-400">エージェント名</label>
                         <input 
                           type="text" 
                           value={agent.name}
                           onChange={(e) => updateAgent(agent.id, { name: e.target.value })}
-                          className="w-full bg-slate-800 border border-slate-600 rounded-md px-3 py-2 text-sm text-slate-200 focus:border-cyan-500 outline-none"
+                          className="w-full bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base font-medium text-slate-100 focus:border-cyan-500 outline-none"
                         />
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-xs text-slate-500">ロール</label>
+                        <label className="text-sm font-medium text-slate-400">ロール</label>
                         <select
                           value={agent.role}
                           onChange={(e) => updateAgent(agent.id, { role: e.target.value as 'Participant' | 'Facilitator' })}
                           disabled={isConversationMode}
-                          className="w-full bg-slate-800 border border-slate-600 rounded-md px-3 py-2 text-sm text-slate-200 focus:border-cyan-500 outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                          className="w-full bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base text-slate-100 focus:border-cyan-500 outline-none disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <option value="Participant">参加者 (Participant)</option>
                           <option value="Facilitator">ファシリテーター (司会進行)</option>
@@ -345,10 +441,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       
                       {/* スタンス */}
                       <div className="space-y-1.5">
-                        <label className="text-xs text-slate-500">スタンス (意見の方向性)</label>
+                        <label className="text-sm font-medium text-slate-400">スタンス (意見の方向性)</label>
                         <button
                           onClick={() => setOpenPanel(isStanceOpen ? null : { agentId: agent.id, type: 'stance' })}
-                          className="w-full flex items-center justify-between bg-slate-800 border border-slate-600 rounded-md px-3 py-2 text-sm text-slate-200 hover:border-cyan-500/50 transition-colors text-left"
+                          className="w-full flex items-center justify-between bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base text-slate-100 hover:border-cyan-500/50 transition-colors text-left"
                         >
                           <span className="truncate">{agent.stance}</span>
                           <ChevronDown size={14} className={`text-slate-500 transition-transform shrink-0 ml-1 ${isStanceOpen ? 'rotate-180' : ''}`} />
@@ -357,10 +453,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
                       {/* 性格 */}
                       <div className="space-y-1.5">
-                        <label className="text-xs text-slate-500">性格 (パーソナリティ)</label>
+                        <label className="text-sm font-medium text-slate-400">性格 (パーソナリティ)</label>
                         <button
                           onClick={() => setOpenPanel(isPersonalityOpen ? null : { agentId: agent.id, type: 'personality' })}
-                          className="w-full flex items-center justify-between bg-slate-800 border border-slate-600 rounded-md px-3 py-2 text-sm text-slate-200 hover:border-cyan-500/50 transition-colors text-left"
+                          className="w-full flex items-center justify-between bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base text-slate-100 hover:border-cyan-500/50 transition-colors text-left"
                         >
                           <span className="truncate">{agent.personality}</span>
                           <ChevronDown size={14} className={`text-slate-500 transition-transform shrink-0 ml-1 ${isPersonalityOpen ? 'rotate-180' : ''}`} />
@@ -377,13 +473,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           selectedValues={getSelectedPresets(agent.stance)}
                           onToggle={(label) => handlePresetToggle(agent.id, 'stance', label)}
                           onClose={() => setOpenPanel(null)}
-                          customValue=""
-                          onCustomChange={(val) => {
-                            if (val) {
-                              const current = agent.stance === '未設定' ? '' : agent.stance;
-                              updateAgent(agent.id, { stance: current ? `${current}・${val}` : val });
-                            }
-                          }}
+                          customValue={getCustomInputValue(agent.id, 'stance')}
+                          onCustomChange={(value) => setCustomInputValue(agent.id, 'stance', value)}
+                          onCustomCommit={() => handleCustomValueCommit(agent.id, 'stance')}
                           accentColor={isFacilitator ? 'amber' : 'cyan'}
                         />
                       </div>
@@ -398,13 +490,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           selectedValues={getSelectedPresets(agent.personality)}
                           onToggle={(label) => handlePresetToggle(agent.id, 'personality', label)}
                           onClose={() => setOpenPanel(null)}
-                          customValue=""
-                          onCustomChange={(val) => {
-                            if (val) {
-                              const current = agent.personality === '未設定' ? '' : agent.personality;
-                              updateAgent(agent.id, { personality: current ? `${current}・${val}` : val });
-                            }
-                          }}
+                          customValue={getCustomInputValue(agent.id, 'personality')}
+                          onCustomChange={(value) => setCustomInputValue(agent.id, 'personality', value)}
+                          onCustomCommit={() => handleCustomValueCommit(agent.id, 'personality')}
                           accentColor={isFacilitator ? 'amber' : 'cyan'}
                         />
                       </div>

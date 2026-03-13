@@ -6,8 +6,11 @@ export type AgentRole = 'Participant' | 'Facilitator';
 // 挙手判定方式
 export type HandRaiseMode = 'rule-based' | 'ai-evaluation';
 
-// セッションモード
-export type SessionMode = 'conversation' | 'meeting';
+// 実行モード
+export type ExecutionMode = 'orchestration' | 'autonomous';
+
+// 討議スタイル
+export type DiscussionStyle = 'conversation' | 'meeting';
 
 // エージェントのデータ構造
 export interface AgentProfile {
@@ -88,7 +91,8 @@ interface TurtleBrainState {
   currentTurn: number;
   environment: 'sandbox' | 'full';
   handRaiseMode: HandRaiseMode;
-  sessionMode: SessionMode;
+  executionMode: ExecutionMode;
+  discussionStyle: DiscussionStyle;
   
   // 対話・議論データ
   messages: Message[];
@@ -100,7 +104,8 @@ interface TurtleBrainState {
 
   // アクション操作
   setTopic: (topic: string) => void;
-  setSessionMode: (mode: SessionMode) => void;
+  setExecutionMode: (mode: ExecutionMode) => void;
+  setDiscussionStyle: (style: DiscussionStyle) => void;
   setHandRaiseMode: (mode: HandRaiseMode) => void;
   setTurnLimit: (limit: number) => void;
   addAgent: (agent: AgentProfile) => void;
@@ -217,22 +222,22 @@ function cloneAgents(agents: AgentProfile[]): AgentProfile[] {
   return agents.map((agent) => ({ ...agent }));
 }
 
-function getSessionDefaults(mode: SessionMode): {
+function getDiscussionStyleDefaults(style: DiscussionStyle): {
   agents: AgentProfile[];
   turnLimit: number;
   handRaiseMode: HandRaiseMode;
 } {
-  if (mode === 'conversation') {
+  if (style === 'conversation') {
     return {
       agents: cloneAgents(conversationDefaultAgents),
-      turnLimit: 4,
+      turnLimit: 3,
       handRaiseMode: 'rule-based'
     };
   }
 
   return {
     agents: cloneAgents(defaultAgents),
-    turnLimit: 2,
+    turnLimit: 3,
     handRaiseMode: 'rule-based'
   };
 }
@@ -243,11 +248,12 @@ function getSessionDefaults(mode: SessionMode): {
 export const useStore = create<TurtleBrainState>((set, get) => ({
   agents: cloneAgents(conversationDefaultAgents),
   topic: '',
-  turnLimit: 4,
+  turnLimit: 3,
   currentTurn: 0,
   environment: 'sandbox',
   handRaiseMode: 'rule-based', // デフォルトはルールベース
-  sessionMode: 'conversation',
+  executionMode: 'orchestration',
+  discussionStyle: 'conversation',
   
   messages: [],
   sessionStatus: 'idle',
@@ -257,9 +263,19 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
   orchestrationDebug: null,
 
   setTopic: (topic) => set({ topic }),
-  setSessionMode: (mode) => set(() => ({
-    sessionMode: mode,
-    ...getSessionDefaults(mode),
+  setExecutionMode: (mode) => set(() => ({
+    executionMode: mode,
+    messages: [],
+    currentTurn: 0,
+    finalConclusion: null,
+    sessionError: null,
+    backendSessionId: null,
+    orchestrationDebug: null,
+    sessionStatus: 'idle'
+  })),
+  setDiscussionStyle: (style) => set(() => ({
+    discussionStyle: style,
+    ...getDiscussionStyleDefaults(style),
     messages: [],
     currentTurn: 0,
     finalConclusion: null,
@@ -284,11 +300,11 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
   })),
 
   // 全エージェントをデフォルトに戻す
-  resetAgentsToDefault: () => set((state) => ({ agents: getSessionDefaults(state.sessionMode).agents })),
+  resetAgentsToDefault: () => set((state) => ({ agents: getDiscussionStyleDefaults(state.discussionStyle).agents })),
   
   // 特定のエージェントをデフォルトに戻す
   resetAgentToDefault: (id) => set((state) => {
-    const defaultAgent = getSessionDefaults(state.sessionMode).agents.find(a => a.id === id);
+    const defaultAgent = getDiscussionStyleDefaults(state.discussionStyle).agents.find(a => a.id === id);
     if (!defaultAgent) return state;
     return {
       agents: state.agents.map(a => a.id === id ? { ...defaultAgent } : a)
@@ -308,7 +324,23 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
   stopSession: () => set({ sessionStatus: 'finished' }),
   addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
   clearSessionError: () => set({ sessionError: null }),
-  resetSession: () => set({ sessionStatus: 'idle', messages: [], currentTurn: 0, finalConclusion: null, sessionError: null, backendSessionId: null, orchestrationDebug: null }),
+  resetSession: () => set((state) => ({
+    topic: '',
+    sessionStatus: 'idle',
+    messages: [],
+    currentTurn: 0,
+    finalConclusion: null,
+    sessionError: null,
+    backendSessionId: null,
+    orchestrationDebug: null,
+    agents: state.agents.map((agent) => ({
+      ...agent,
+      runtimeSessionId: null,
+      status: 'idle' as const,
+      speakCount: 0,
+      handRaiseIntensity: 0
+    }))
+  })),
 
   // ===================================================================
   // メインの議論ループ
@@ -323,7 +355,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         body: JSON.stringify({
           sessionId: state.backendSessionId,
           topic: state.topic,
-          sessionMode: state.sessionMode,
+          discussionStyle: state.discussionStyle,
           turnLimit: state.turnLimit,
           agents: state.agents
         })

@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 
 export type AgentRole = 'Participant' | 'Facilitator';
-export type SessionMode = 'conversation' | 'meeting';
+export type DiscussionStyle = 'conversation' | 'meeting';
 
 export interface AgentProfileInput {
   id: string;
@@ -78,7 +78,7 @@ export interface OrchestratorDebugSnapshot {
 export interface RunTurnRequest {
   sessionId?: string;
   topic: string;
-  sessionMode: SessionMode;
+  discussionStyle: DiscussionStyle;
   turnLimit: number;
   agents: AgentProfileInput[];
 }
@@ -129,7 +129,7 @@ interface ScoreDecision {
 interface MeetingSession {
   id: string;
   topic: string;
-  mode: SessionMode;
+  discussionStyle: DiscussionStyle;
   turnLimit: number;
   currentTurn: number;
   status: 'idle' | 'running' | 'finished';
@@ -229,7 +229,7 @@ export class MeetingOrchestrator {
       return this.serializeSession(session);
     }
 
-    if (session.mode === 'conversation') {
+    if (session.discussionStyle === 'conversation') {
       await this.runConversationTurn(session);
     } else {
       await this.runMeetingTurn(session);
@@ -249,7 +249,7 @@ export class MeetingOrchestrator {
     const session: MeetingSession = {
       id,
       topic: input.topic,
-      mode: input.sessionMode,
+      discussionStyle: input.discussionStyle,
       turnLimit: input.turnLimit,
       currentTurn: 1,
       status: 'idle',
@@ -341,6 +341,59 @@ export class MeetingOrchestrator {
   private async runMeetingTurn(session: MeetingSession): Promise<void> {
     const facilitator = session.agents.find((agent) => agent.role === 'Facilitator') ?? null;
     const participants = session.agents.filter((agent) => agent.role === 'Participant');
+
+    if (session.messages.length === 0 && facilitator) {
+      const workerRuns: OrchestratorDebugSnapshot['workers'] = [];
+      const speechPrompt = this.buildMeetingPrompt(session, facilitator, null, []);
+      const speechStartedAt = Date.now();
+      const result = await this.runCodex(facilitator.model, speechPrompt, facilitator.runtimeSessionId ?? undefined);
+      const speechFinishedAt = Date.now();
+      workerRuns.push({
+        workerId: `speech:${facilitator.id}`,
+        kind: 'speech',
+        targetAgentId: facilitator.id,
+        startedAt: speechStartedAt,
+        finishedAt: speechFinishedAt,
+        durationMs: speechFinishedAt - speechStartedAt
+      });
+
+      facilitator.runtimeSessionId = result.sessionId;
+      facilitator.speakCount += 1;
+      participants.forEach((agent) => {
+        agent.handRaiseIntensity = 0;
+      });
+
+      const message = this.recordMessage(session, facilitator, result.response, 'moderation');
+      this.deliverMessage(session, facilitator.id, message);
+
+      session.debug = {
+        sessionId: session.id,
+        turn: session.currentTurn,
+        selectedSpeakerId: facilitator.id,
+        dispatchReason: '会議開始時はファシリテーターが冒頭整理を行い、論点と進め方を提示します。',
+        facilitator: {
+          agentId: facilitator.id,
+          runtimeSessionId: facilitator.runtimeSessionId,
+          overview: '会議の目的と進め方を冒頭で整理',
+          rationale: '開始直後は参加者より先にファシリテーターが議題を整える方が議論が安定するため。',
+          nextFocus: '参加者がどの観点から意見を出すべきかを明示',
+          selectedAgentId: null,
+          inviteAgentIds: participants.map((agent) => agent.id),
+          interventionPriority: 100,
+          shouldIntervene: true
+        },
+        scores: [],
+        workers: workerRuns,
+        agentSessions: session.agents.map((agent) => ({
+          agentId: agent.id,
+          runtimeSessionId: agent.runtimeSessionId,
+          inboxCount: agent.inbox.length,
+          outboxCount: agent.outbox.length
+        })),
+        log: session.log.slice(-8)
+      };
+      return;
+    }
 
     const workerRuns: OrchestratorDebugSnapshot['workers'] = [];
 
@@ -459,7 +512,8 @@ export class MeetingOrchestrator {
     const facilitator = session.agents.find((agent) => agent.role === 'Facilitator') ?? session.agents[0];
     const transcript = getRecentTranscript(session, 20);
     const prompt = `あなたは会議全体を取りまとめる役割です。テーマ「${session.topic}」についての議論を収束させてください。` +
-      ` 次の形式で日本語でまとめてください: 1. 総括サマリー 2. 共通認識 3. 対立軸 4. 次のアクション。` +
+      ` 次の形式で日本語でまとめてください: 1. 総括サマリー 2. 共通認識 3. 未解決論点 4. 次のアクション。` +
+      ` 共通認識は議論内で繰り返し現れた順に並べ、次のアクションは特に重要なものを最大5件までに絞ってください。` +
       ` 議論ログ: ${transcript}`;
     const startedAt = Date.now();
     const result = await this.runCodex(facilitator.model, prompt, facilitator.runtimeSessionId ?? undefined);
