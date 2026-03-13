@@ -28,17 +28,17 @@ function runCodexExec(model: string, prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
     // 出力用の一時ファイルを生成
     const tmpOutFile = path.join(os.tmpdir(), `codex-out-${Date.now()}.txt`);
-    
-    // プロンプト内の改行をスペースに置換（Windowsシェルがダブルクォート内の改行でコマンドを分断するのを防止）
-    const singleLinePrompt = prompt.replace(/\r?\n/g, ' ');
-    // プロンプト内のダブルクォートをエスケープし、全体をダブルクォートで囲む
-    const escapedPrompt = singleLinePrompt.replace(/"/g, '\\"');
-    const cmdStr = `codex exec -m ${model} -o "${tmpOutFile}" "${escapedPrompt}"`;
-    
+
+    const isWindows = process.platform === 'win32';
+    const codexEntryPath = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+    const codexCommand = isWindows ? process.execPath : 'npx';
+    const args = isWindows
+      ? [codexEntryPath, 'exec', '-m', model, '-o', tmpOutFile, prompt]
+      : ['codex', 'exec', '-m', model, '-o', tmpOutFile, prompt];
+
     console.log(`[Codex] Running command (prompt length: ${prompt.length}, output: ${tmpOutFile})...`);
 
-    const child = spawn(cmdStr, {
-      shell: true,
+    const child = spawn(codexCommand, args, {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
