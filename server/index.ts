@@ -5,6 +5,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { MeetingOrchestrator, type CodexExecResult, type RunTurnRequest } from './orchestrator';
 
 dotenv.config();
 
@@ -24,7 +25,7 @@ app.get('/api/health', (_req, res) => {
  * `-o` フラグで一時ファイルにクリーンな応答のみを書き出し、それを読み取る。
  * これによりstdoutに混入するメタデータ（セッション情報、トークン数等）を回避する。
  */
-function runCodexExec(model: string, prompt: string): Promise<string> {
+function runCodexExec(model: string, prompt: string, sessionId?: string): Promise<CodexExecResult> {
   return new Promise((resolve, reject) => {
     // 出力用の一時ファイルを生成
     const tmpOutFile = path.join(os.tmpdir(), `codex-out-${Date.now()}.txt`);
@@ -32,9 +33,10 @@ function runCodexExec(model: string, prompt: string): Promise<string> {
     const isWindows = process.platform === 'win32';
     const codexEntryPath = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
     const codexCommand = isWindows ? process.execPath : 'npx';
-    const args = isWindows
-      ? [codexEntryPath, 'exec', '-m', model, '-o', tmpOutFile, prompt]
-      : ['codex', 'exec', '-m', model, '-o', tmpOutFile, prompt];
+    const baseArgs = sessionId
+      ? ['exec', '--json', 'resume', sessionId, '-m', model, '-o', tmpOutFile, prompt]
+      : ['exec', '--json', '-m', model, '-o', tmpOutFile, prompt];
+    const args = isWindows ? [codexEntryPath, ...baseArgs] : ['codex', ...baseArgs];
 
     console.log(`[Codex] Running command (prompt length: ${prompt.length}, output: ${tmpOutFile})...`);
 
@@ -42,7 +44,12 @@ function runCodexExec(model: string, prompt: string): Promise<string> {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
+    let stdout = '';
     let stderr = '';
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
+    });
 
     child.stderr.on('data', (data: Buffer) => {
       stderr += data.toString();
@@ -61,6 +68,18 @@ function runCodexExec(model: string, prompt: string): Promise<string> {
       // -o フラグで保存されたファイルからクリーンな応答を読み取る
       try {
         const response = fs.readFileSync(tmpOutFile, 'utf-8').trim();
+        const sessionIdFromStdout = stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            try {
+              return JSON.parse(line);
+            } catch {
+              return null;
+            }
+          })
+          .find((entry) => entry?.type === 'thread.started')?.thread_id ?? null;
         console.log(`[Codex] Response loaded from file (${response.length} chars)`);
         
         // 一時ファイルの片付け
@@ -71,7 +90,7 @@ function runCodexExec(model: string, prompt: string): Promise<string> {
           return;
         }
         
-        resolve(response);
+        resolve({ response, sessionId: sessionIdFromStdout ?? sessionId ?? null });
       } catch (readErr) {
         console.error(`[Codex] Failed to read output file:`, readErr);
         // ファイルが無い場合は一時ファイルの片付け
@@ -87,22 +106,36 @@ function runCodexExec(model: string, prompt: string): Promise<string> {
   });
 }
 
+const orchestrator = new MeetingOrchestrator(runCodexExec);
+
 // Codex CLI呼び出しエンドポイント
 app.post('/api/agent/interact', async (req, res) => {
   try {
-    const { prompt, model = 'gpt-5.4' } = req.body;
+    const { prompt, model = 'gpt-5.4', sessionId } = req.body;
     console.log(`[API] Received prompt for ${model}. Executing Codex CLI...`);
     
-    const response = await runCodexExec(model, prompt);
+    const result = await runCodexExec(model, prompt, sessionId);
 
-    console.log(`[API] Response (first 100 chars): ${response.substring(0, 100)}`);
+    console.log(`[API] Response (first 100 chars): ${result.response.substring(0, 100)}`);
 
     res.json({ 
       success: true, 
-      response: response 
+      response: result.response,
+      sessionId: result.sessionId
     });
   } catch (error) {
     console.error('[API] Error during agent interaction:', error);
+    res.status(500).json({ success: false, error: 'Internal Server Error', details: String(error) });
+  }
+});
+
+app.post('/api/orchestrator/run-turn', async (req, res) => {
+  try {
+    const payload = req.body as RunTurnRequest;
+    const result = await orchestrator.runTurn(payload);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[API] Error during orchestration:', error);
     res.status(500).json({ success: false, error: 'Internal Server Error', details: String(error) });
   }
 });

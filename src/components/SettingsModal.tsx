@@ -120,6 +120,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       stance: 'バランス重視',
       personality: 'フラット',
       model: 'gpt-5.4',
+      runtimeSessionId: null,
       status: 'idle',
       handRaiseIntensity: 0,
       speakCount: 0

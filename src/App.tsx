@@ -5,7 +5,7 @@ import { SettingsModal } from './components/SettingsModal'
 
 function App() {
   const { 
-    agents, topic, sessionStatus, startSession, stopSession, messages, currentTurn, processNextTurn, finalConclusion, sessionMode, sessionError, clearSessionError
+    agents, topic, sessionStatus, startSession, stopSession, messages, currentTurn, processNextTurn, finalConclusion, sessionMode, sessionError, clearSessionError, orchestrationDebug, backendSessionId
   } = useStore()
 
   const sessionModeLabel = sessionMode === 'conversation' ? 'Conversation モード' : 'Meeting モード'
@@ -20,6 +20,7 @@ function App() {
   const [localTopic, setLocalTopic] = useState(topic)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [summaryModal, setSummaryModal] = useState<{ agentName: string; content: string } | null>(null)
+  const [isDebugOpen, setIsDebugOpen] = useState(false)
 
   // 議論ループの制御
   useEffect(() => {
@@ -134,10 +135,92 @@ function App() {
 
           <div className="space-y-4">
             <div className={`rounded-xl border p-3 ${sessionModePanelClass}`}>
-              <p className={`text-xs font-semibold uppercase tracking-wider ${sessionModeLabelClass}`}>Session Mode</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className={`text-xs font-semibold uppercase tracking-wider ${sessionModeLabelClass}`}>Session Mode</p>
+                <button
+                  onClick={() => setIsDebugOpen((open) => !open)}
+                  className="rounded-md border border-slate-700/60 px-2 py-1 text-[10px] text-slate-400 hover:border-slate-500 hover:text-slate-200"
+                >
+                  {isDebugOpen ? '診断を閉じる' : '診断'}
+                </button>
+              </div>
               <p className="mt-2 text-sm font-medium text-slate-200">{sessionModeLabel}</p>
               <p className="mt-1 text-xs text-slate-400">{sessionModeDescription}</p>
             </div>
+
+            {isDebugOpen && (
+              <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3 text-xs text-slate-300 space-y-3">
+                <div>
+                  <p className="font-semibold text-slate-200">Diagnostics</p>
+                  <p className="mt-1 text-slate-500">内部状態の観測用です。UIを壊さない範囲で会議オーケストレーターの動きを表示しています。</p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-slate-500">フロント保持 Session ID</p>
+                  <p className="font-mono text-[11px] text-slate-200 break-all">{backendSessionId ?? '未開始'}</p>
+                </div>
+
+                {orchestrationDebug ? (
+                  <>
+                    <div className="space-y-1">
+                      <p className="text-slate-500">最新ディスパッチ</p>
+                      <p className="text-slate-200">{orchestrationDebug.dispatchReason}</p>
+                    </div>
+
+                    {orchestrationDebug.facilitator && (
+                      <div className="space-y-1">
+                        <p className="text-slate-500">ファシリテーター判断</p>
+                        <p className="text-slate-200">整理: {orchestrationDebug.facilitator.overview}</p>
+                        <p className="text-slate-400">理由: {orchestrationDebug.facilitator.rationale}</p>
+                        <p className="text-slate-400">次の焦点: {orchestrationDebug.facilitator.nextFocus}</p>
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <p className="text-slate-500">挙手判定</p>
+                      <div className="space-y-2">
+                        {orchestrationDebug.scores.map((score) => {
+                          const agent = agents.find((entry) => entry.id === score.agentId)
+                          return (
+                            <div key={score.agentId} className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-2">
+                              <p className="text-slate-200">{agent?.name ?? score.agentId}: {score.score} / {score.confidence}</p>
+                              <p className="text-slate-400">{score.desiredAction} - {score.reason}</p>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <p className="text-slate-500">Worker 実行</p>
+                      <div className="space-y-1">
+                        {orchestrationDebug.workers.map((worker) => (
+                          <p key={worker.workerId} className="text-slate-400">{worker.kind} / {worker.targetAgentId ?? 'system'} / {worker.durationMs}ms</p>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <p className="text-slate-500">Agent Session / Mailbox</p>
+                      <div className="space-y-1">
+                        {orchestrationDebug.agentSessions.map((entry) => {
+                          const agent = agents.find((item) => item.id === entry.agentId)
+                          return (
+                            <div key={entry.agentId} className="text-slate-400">
+                              <p>{agent?.name ?? entry.agentId}</p>
+                              <p className="font-mono text-[10px] break-all">sid: {entry.runtimeSessionId ?? 'none'}</p>
+                              <p>inbox {entry.inboxCount} / outbox {entry.outboxCount}</p>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-slate-500">まだ会議オーケストレーターの実行ログはありません。</p>
+                )}
+              </div>
+            )}
 
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
               参加エージェント ({agents.length}名)
