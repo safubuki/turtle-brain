@@ -1,73 +1,73 @@
-# React + TypeScript + Vite
+# Turtle Brain
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Turtle Brain は、複数の AI エージェントに役割を与えて議論や対話を進めるためのマルチエージェント会話アプリです。フロントエンドは React + Vite、バックエンドは Express + TypeScript で構成され、Codex CLI を使って各エージェントの発話や会議オーケストレーションを実行します。
 
-Currently, two official plugins are available:
+## 主な機能
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Conversation モード: 2 人のエージェントが交互に対話するモード
+- Meeting モード: 参加者、ファシリテーター、オーケストレーターが会議形式で議論を進めるモード
+- 半常駐型エージェント: 各エージェントが専用の sessionId を持ち、会話文脈を継続
+- Diagnostics 表示: sessionId、ファシリテーター判断、worker 実行、mailbox 状態を控えめに可視化
+- Markdown エクスポート: 議論ログと最終結論を MD で保存
 
-## React Compiler
+## セットアップ
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+前提:
 
-## Expanding the ESLint configuration
+- Node.js 18 以上
+- npm
+- Codex CLI が利用可能であること
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+依存関係をインストールします。
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+```powershell
+cd c:\git_home\turtle-brain
+npm install
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+cd server
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 使い方
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+ルートで以下を実行すると、フロントエンドとバックエンドが同時に起動します。
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```powershell
+cd c:\git_home\turtle-brain
+npm run dev
 ```
+
+通常の待受ポート:
+
+- フロントエンド: http://localhost:5173
+- バックエンド: http://localhost:3001
+
+もし 5173 が使用中なら、Vite は 5174 以降の空きポートで起動します。
+
+### 基本操作
+
+1. アプリを開く
+2. 設定・エージェント管理でモードやエージェント構成を調整する
+3. テーマを入力して議論開始を押す
+4. 必要に応じてサイドバーの Diagnostics で内部状態を確認する
+5. 最終結論や議論ログを Markdown で保存する
+
+## 開発コマンド
+
+```powershell
+npm run dev
+npm run build
+```
+
+server 側だけ起動したい場合:
+
+```powershell
+cd c:\git_home\turtle-brain
+npm --prefix server run dev
+```
+
+## ライセンス
+
+このプロジェクトは GNU General Public License v3.0 で提供されます。
+
+詳細は [LICENSE](LICENSE) を参照してください。
