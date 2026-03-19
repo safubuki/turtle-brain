@@ -1,254 +1,319 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'crypto'
+import { loadInputContext } from './contextLoader'
+import type {
+  AgentCliProvider,
+  AgentRateLimits,
+  CliExecResult,
+  CliRunOptions,
+  ReasoningEffort
+} from './cliRunner'
 
-export type AgentRole = 'Participant' | 'Facilitator';
-export type DiscussionStyle = 'conversation' | 'meeting';
+export type AgentRole = 'Participant' | 'Facilitator'
+export type DiscussionStyle = 'conversation' | 'meeting'
 
 export interface AgentProfileInput {
-  id: string;
-  name: string;
-  role: AgentRole;
-  stance: string;
-  personality: string;
-  model: string;
-  runtimeSessionId: string | null;
-  status: 'idle' | 'thinking' | 'speaking' | 'raising_hand';
-  handRaiseIntensity: number;
-  speakCount: number;
+  id: string
+  name: string
+  role: AgentRole
+  stance: string
+  personality: string
+  provider: AgentCliProvider
+  model: string
+  reasoningEffort: ReasoningEffort
+  runtimeSessionId: string | null
+  rateLimits: AgentRateLimits | null
+  status: 'idle' | 'thinking' | 'speaking' | 'raising_hand'
+  handRaiseIntensity: number
+  speakCount: number
 }
 
 export interface MessageRecord {
-  id: string;
-  agentId: string;
-  content: string;
-  summary: string;
-  timestamp: number;
-}
-
-export interface CodexExecResult {
-  response: string;
-  sessionId: string | null;
+  id: string
+  agentId: string
+  content: string
+  summary: string
+  timestamp: number
 }
 
 export interface OrchestratorDebugSnapshot {
-  sessionId: string;
-  turn: number;
-  selectedSpeakerId: string | null;
-  dispatchReason: string;
+  sessionId: string
+  turn: number
+  selectedSpeakerId: string | null
+  dispatchReason: string
   facilitator: {
-    agentId: string;
-    runtimeSessionId: string | null;
-    overview: string;
-    rationale: string;
-    nextFocus: string;
-    selectedAgentId: string | null;
-    inviteAgentIds: string[];
-    interventionPriority: number;
-    shouldIntervene: boolean;
-  } | null;
+    agentId: string
+    runtimeSessionId: string | null
+    overview: string
+    rationale: string
+    nextFocus: string
+    selectedAgentId: string | null
+    selectedAgentIds: string[]
+    inviteAgentIds: string[]
+    interventionPriority: number
+    shouldIntervene: boolean
+    parallelDispatch: boolean
+  } | null
   scores: Array<{
-    agentId: string;
-    runtimeSessionId: string | null;
-    score: number;
-    confidence: number;
-    desiredAction: string;
-    reason: string;
-  }>;
+    agentId: string
+    runtimeSessionId: string | null
+    score: number
+    confidence: number
+    desiredAction: string
+    reason: string
+  }>
   workers: Array<{
-    workerId: string;
-    kind: 'score' | 'moderation' | 'speech' | 'synthesis';
-    targetAgentId?: string;
-    startedAt: number;
-    finishedAt: number;
-    durationMs: number;
-  }>;
+    workerId: string
+    kind: 'score' | 'moderation' | 'speech' | 'synthesis'
+    targetAgentId?: string
+    startedAt: number
+    finishedAt: number
+    durationMs: number
+  }>
   agentSessions: Array<{
-    agentId: string;
-    runtimeSessionId: string | null;
-    inboxCount: number;
-    outboxCount: number;
-  }>;
+    agentId: string
+    runtimeSessionId: string | null
+    inboxCount: number
+    outboxCount: number
+  }>
   log: Array<{
-    turn: number;
-    kind: 'message' | 'moderation' | 'synthesis';
-    summary: string;
-    timestamp: number;
-  }>;
+    turn: number
+    kind: 'message' | 'moderation' | 'synthesis'
+    summary: string
+    timestamp: number
+  }>
 }
 
 export interface RunTurnRequest {
-  sessionId?: string;
-  topic: string;
-  discussionStyle: DiscussionStyle;
-  turnLimit: number;
-  agents: AgentProfileInput[];
+  sessionId?: string
+  topic: string
+  inputPaths?: string[]
+  discussionStyle: DiscussionStyle
+  turnLimit: number
+  agents: AgentProfileInput[]
 }
 
 export interface RunTurnResponse {
-  sessionId: string;
-  agents: AgentProfileInput[];
-  messages: MessageRecord[];
-  currentTurn: number;
-  sessionStatus: 'idle' | 'running' | 'finished';
-  finalConclusion: string | null;
-  debug: OrchestratorDebugSnapshot | null;
+  sessionId: string
+  agents: AgentProfileInput[]
+  messages: MessageRecord[]
+  currentTurn: number
+  sessionStatus: 'idle' | 'running' | 'finished'
+  finalConclusion: string | null
+  debug: OrchestratorDebugSnapshot | null
 }
 
 interface MailboxItem {
-  id: string;
-  fromAgentId: string;
-  kind: 'message' | 'facilitator-note' | 'system';
-  content: string;
-  summary: string;
-  timestamp: number;
+  id: string
+  fromAgentId: string
+  kind: 'message' | 'facilitator-note' | 'system'
+  content: string
+  summary: string
+  timestamp: number
 }
 
 interface RuntimeAgent extends AgentProfileInput {
-  inbox: MailboxItem[];
-  outbox: MailboxItem[];
+  inbox: MailboxItem[]
+  outbox: MailboxItem[]
 }
 
 interface FacilitatorDecision {
-  overview: string;
-  rationale: string;
-  nextFocus: string;
-  selectedAgentId: string | null;
-  inviteAgentIds: string[];
-  interventionPriority: number;
-  shouldIntervene: boolean;
+  overview: string
+  rationale: string
+  nextFocus: string
+  selectedAgentId: string | null
+  selectedAgentIds: string[]
+  inviteAgentIds: string[]
+  interventionPriority: number
+  shouldIntervene: boolean
+  parallelDispatch: boolean
 }
 
 interface ScoreDecision {
-  agentId: string;
-  runtimeSessionId: string | null;
-  score: number;
-  confidence: number;
-  desiredAction: string;
-  reason: string;
+  agentId: string
+  runtimeSessionId: string | null
+  score: number
+  confidence: number
+  desiredAction: string
+  reason: string
 }
 
 interface MeetingSession {
-  id: string;
-  topic: string;
-  discussionStyle: DiscussionStyle;
-  turnLimit: number;
-  currentTurn: number;
-  status: 'idle' | 'running' | 'finished';
-  agents: RuntimeAgent[];
-  messages: MessageRecord[];
-  finalConclusion: string | null;
-  debug: OrchestratorDebugSnapshot | null;
-  log: OrchestratorDebugSnapshot['log'];
+  id: string
+  topic: string
+  inputPaths: string[]
+  inputContextPrompt: string
+  inputContextWarnings: string[]
+  discussionStyle: DiscussionStyle
+  turnLimit: number
+  currentTurn: number
+  status: 'idle' | 'running' | 'finished'
+  agents: RuntimeAgent[]
+  messages: MessageRecord[]
+  finalConclusion: string | null
+  debug: OrchestratorDebugSnapshot | null
+  log: OrchestratorDebugSnapshot['log']
 }
 
-type CodexRunner = (model: string, prompt: string, sessionId?: string) => Promise<CodexExecResult>;
+type CliRunner = (options: CliRunOptions) => Promise<CliExecResult>
 
 function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+  return Math.max(min, Math.min(max, value))
 }
 
 function summarizeResponse(response: string): string {
-  const firstSentenceEnd = response.indexOf('。');
-  if (firstSentenceEnd > 0 && firstSentenceEnd < 80) {
-    return response.substring(0, firstSentenceEnd + 1);
+  const normalized = response.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= 80) {
+    return normalized
   }
-  if (firstSentenceEnd > 80) {
-    return response.substring(0, 40) + '…';
-  }
-  return response.length > 50 ? response.substring(0, 50) + '…' : response;
+
+  return `${normalized.slice(0, 80).trim()}...`
 }
 
 function cloneAgent(agent: AgentProfileInput): RuntimeAgent {
   return {
     ...agent,
     runtimeSessionId: agent.runtimeSessionId ?? null,
+    rateLimits: agent.rateLimits ?? null,
     status: 'idle',
     handRaiseIntensity: 0,
     speakCount: 0,
     inbox: [],
     outbox: []
-  };
+  }
 }
 
 function extractJson<T>(text: string): T | null {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
-  const candidate = fenced?.[1] ?? text;
-  const start = candidate.indexOf('{');
-  const end = candidate.lastIndexOf('}');
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i)
+  const candidate = fenced?.[1] ?? text
+  const start = candidate.indexOf('{')
+  const end = candidate.lastIndexOf('}')
   if (start === -1 || end === -1 || end <= start) {
-    return null;
+    return null
   }
 
   try {
-    return JSON.parse(candidate.slice(start, end + 1)) as T;
+    return JSON.parse(candidate.slice(start, end + 1)) as T
   } catch {
-    return null;
+    return null
   }
 }
 
 function trimMailbox(items: MailboxItem[], maxItems = 12): MailboxItem[] {
-  return items.slice(-maxItems);
+  return items.slice(-maxItems)
 }
 
 function getRecentTranscript(session: MeetingSession, limit = 8): string {
   return session.messages
     .slice(-limit)
     .map((message) => {
-      const agent = session.agents.find((entry) => entry.id === message.agentId);
-      return `${agent?.name ?? message.agentId}: ${message.content}`;
+      const agent = session.agents.find((entry) => entry.id === message.agentId)
+      return `${agent?.name ?? message.agentId}: ${message.content}`
     })
-    .join(' --- ');
+    .join(' --- ')
+}
+
+function getSharedPromptContext(session: MeetingSession): string {
+  const parts = [`テーマ: ${session.topic}`]
+
+  if (session.inputContextPrompt) {
+    parts.push(session.inputContextPrompt)
+  }
+
+  if (session.inputContextWarnings.length > 0) {
+    parts.push(`入力コンテキストの注意:\n${session.inputContextWarnings.join('\n')}`)
+  }
+
+  return parts.join('\n\n')
+}
+
+function buildReasoningGuidance(reasoningEffort: ReasoningEffort): string {
+  switch (reasoningEffort) {
+    case 'low':
+      return '推論強度は low。簡潔に答えてください。'
+    case 'high':
+      return '推論強度は high。論点を整理して慎重に答えてください。'
+    case 'xhigh':
+      return '推論強度は xhigh。十分に比較検討したうえで答えてください。'
+    default:
+      return '推論強度は medium。簡潔さと妥当性のバランスを取ってください。'
+  }
+}
+
+function applyResultToAgent(agent: RuntimeAgent, result: CliExecResult): void {
+  agent.runtimeSessionId = result.sessionId ?? agent.runtimeSessionId
+  if (result.rateLimits) {
+    agent.rateLimits = result.rateLimits
+  }
 }
 
 function getNextConversationSpeaker(session: MeetingSession): RuntimeAgent {
-  const participants = session.agents.filter((agent) => agent.role === 'Participant').slice(0, 2);
+  const participants = session.agents.filter((agent) => agent.role === 'Participant').slice(0, 2)
   if (participants.length === 0) {
-    return session.agents[0];
+    return session.agents[0]
   }
+
   if (participants.length === 1 || session.messages.length === 0) {
-    return [...participants].sort((left, right) => left.speakCount - right.speakCount)[0];
+    return [...participants].sort((left, right) => left.speakCount - right.speakCount)[0]
   }
-  const lastSpeakerId = session.messages[session.messages.length - 1].agentId;
-  return participants.find((agent) => agent.id !== lastSpeakerId) ?? participants[0];
+
+  const lastSpeakerId = session.messages[session.messages.length - 1].agentId
+  return participants.find((agent) => agent.id !== lastSpeakerId) ?? participants[0]
 }
 
 export class MeetingOrchestrator {
-  private readonly sessions = new Map<string, MeetingSession>();
+  private readonly sessions = new Map<string, MeetingSession>()
 
-  constructor(private readonly runCodex: CodexRunner) {}
+  constructor(private readonly runCli: CliRunner) {}
 
   async runTurn(input: RunTurnRequest): Promise<RunTurnResponse> {
+    const isNewSession = !input.sessionId || !this.sessions.has(input.sessionId)
+    const inputPaths = input.inputPaths ?? []
+    const loadedContext = isNewSession || input.sessionId === undefined
+      ? await loadInputContext(inputPaths)
+      : null
+
     const session = input.sessionId && this.sessions.has(input.sessionId)
       ? this.sessions.get(input.sessionId)!
-      : this.createSession(input);
+      : this.createSession(input, loadedContext?.promptBlock ?? '', loadedContext?.warnings ?? [])
 
-    session.status = 'running';
+    if (!isNewSession && JSON.stringify(session.inputPaths) !== JSON.stringify(inputPaths)) {
+      const refreshedContext = await loadInputContext(inputPaths)
+      session.inputPaths = [...inputPaths]
+      session.inputContextPrompt = refreshedContext.promptBlock
+      session.inputContextWarnings = refreshedContext.warnings
+    }
 
-    const totalTurns = session.turnLimit * session.agents.length;
+    session.status = 'running'
+
+    const totalTurns = session.turnLimit * Math.max(session.agents.length, 1)
     if (session.currentTurn > totalTurns) {
-      await this.finalizeSession(session);
-      return this.serializeSession(session);
+      await this.finalizeSession(session)
+      return this.serializeSession(session)
     }
 
     if (session.discussionStyle === 'conversation') {
-      await this.runConversationTurn(session);
+      await this.runConversationTurn(session)
     } else {
-      await this.runMeetingTurn(session);
+      await this.runMeetingTurn(session)
     }
 
-    session.currentTurn += 1;
+    session.currentTurn += 1
 
     if (session.currentTurn > totalTurns) {
-      await this.finalizeSession(session);
+      await this.finalizeSession(session)
     }
 
-    return this.serializeSession(session);
+    return this.serializeSession(session)
   }
 
-  private createSession(input: RunTurnRequest): MeetingSession {
-    const id = input.sessionId ?? randomUUID();
+  private createSession(input: RunTurnRequest, inputContextPrompt: string, inputContextWarnings: string[]): MeetingSession {
+    const id = input.sessionId ?? randomUUID()
     const session: MeetingSession = {
       id,
       topic: input.topic,
+      inputPaths: [...(input.inputPaths ?? [])],
+      inputContextPrompt,
+      inputContextWarnings,
       discussionStyle: input.discussionStyle,
       turnLimit: input.turnLimit,
       currentTurn: 1,
@@ -258,9 +323,10 @@ export class MeetingOrchestrator {
       finalConclusion: null,
       debug: null,
       log: []
-    };
-    this.sessions.set(id, session);
-    return session;
+    }
+
+    this.sessions.set(id, session)
+    return session
   }
 
   private serializeSession(session: MeetingSession): RunTurnResponse {
@@ -272,8 +338,11 @@ export class MeetingOrchestrator {
         role: agent.role,
         stance: agent.stance,
         personality: agent.personality,
+        provider: agent.provider,
         model: agent.model,
+        reasoningEffort: agent.reasoningEffort,
         runtimeSessionId: agent.runtimeSessionId,
+        rateLimits: agent.rateLimits,
         status: agent.status,
         handRaiseIntensity: agent.handRaiseIntensity,
         speakCount: agent.speakCount
@@ -283,32 +352,38 @@ export class MeetingOrchestrator {
       sessionStatus: session.status,
       finalConclusion: session.finalConclusion,
       debug: session.debug
-    };
+    }
   }
 
   private async runConversationTurn(session: MeetingSession): Promise<void> {
-    const speaker = getNextConversationSpeaker(session);
-    const prompt = this.buildConversationPrompt(session, speaker);
-    const startedAt = Date.now();
-    const result = await this.runCodex(speaker.model, prompt, speaker.runtimeSessionId ?? undefined);
-    const finishedAt = Date.now();
+    const speaker = getNextConversationSpeaker(session)
+    const prompt = this.buildConversationPrompt(session, speaker)
+    const startedAt = Date.now()
+    const result = await this.runCli({
+      provider: speaker.provider,
+      model: speaker.model,
+      reasoningEffort: speaker.reasoningEffort,
+      prompt,
+      sessionId: speaker.runtimeSessionId ?? undefined
+    })
+    const finishedAt = Date.now()
 
-    speaker.runtimeSessionId = result.sessionId;
-    speaker.status = 'idle';
-    speaker.speakCount += 1;
+    applyResultToAgent(speaker, result)
+    speaker.status = 'idle'
+    speaker.speakCount += 1
 
-    const message = this.recordMessage(session, speaker, result.response, 'message');
-    this.deliverMessage(session, speaker.id, message);
+    const message = this.recordMessage(session, speaker, result.response, 'message')
+    this.deliverMessage(session, speaker.id, message)
 
     session.agents.forEach((agent) => {
-      agent.handRaiseIntensity = agent.id === speaker.id ? 100 : 0;
-    });
+      agent.handRaiseIntensity = agent.id === speaker.id ? 100 : 0
+    })
 
     session.debug = {
       sessionId: session.id,
       turn: session.currentTurn,
       selectedSpeakerId: speaker.id,
-      dispatchReason: 'Conversation モードでは直前とは別の参加者が交互に応答します。',
+      dispatchReason: 'Conversation モードのため、直前の発話者と異なる参加者を選択しました。',
       facilitator: null,
       scores: session.agents
         .filter((agent) => agent.role === 'Participant')
@@ -318,7 +393,7 @@ export class MeetingOrchestrator {
           score: agent.id === speaker.id ? 100 : 0,
           confidence: 100,
           desiredAction: agent.id === speaker.id ? 'respond' : 'wait',
-          reason: agent.id === speaker.id ? '交互応答の順番になったため選出。' : '相手の返答待ち。'
+          reason: agent.id === speaker.id ? '交互発話ロジックで選択' : '今回は待機'
         })),
       workers: [{
         workerId: `speech:${speaker.id}`,
@@ -335,55 +410,61 @@ export class MeetingOrchestrator {
         outboxCount: agent.outbox.length
       })),
       log: session.log.slice(-8)
-    };
+    }
   }
 
   private async runMeetingTurn(session: MeetingSession): Promise<void> {
-    const facilitator = session.agents.find((agent) => agent.role === 'Facilitator') ?? null;
-    const participants = session.agents.filter((agent) => agent.role === 'Participant');
+    const facilitator = session.agents.find((agent) => agent.role === 'Facilitator') ?? null
+    const participants = session.agents.filter((agent) => agent.role === 'Participant')
 
     if (session.messages.length === 0 && facilitator) {
-      const workerRuns: OrchestratorDebugSnapshot['workers'] = [];
-      const speechPrompt = this.buildMeetingPrompt(session, facilitator, null, []);
-      const speechStartedAt = Date.now();
-      const result = await this.runCodex(facilitator.model, speechPrompt, facilitator.runtimeSessionId ?? undefined);
-      const speechFinishedAt = Date.now();
-      workerRuns.push({
-        workerId: `speech:${facilitator.id}`,
-        kind: 'speech',
-        targetAgentId: facilitator.id,
-        startedAt: speechStartedAt,
-        finishedAt: speechFinishedAt,
-        durationMs: speechFinishedAt - speechStartedAt
-      });
+      const prompt = this.buildMeetingPrompt(session, facilitator, null, [])
+      const startedAt = Date.now()
+      const result = await this.runCli({
+        provider: facilitator.provider,
+        model: facilitator.model,
+        reasoningEffort: facilitator.reasoningEffort,
+        prompt,
+        sessionId: facilitator.runtimeSessionId ?? undefined
+      })
+      const finishedAt = Date.now()
 
-      facilitator.runtimeSessionId = result.sessionId;
-      facilitator.speakCount += 1;
+      applyResultToAgent(facilitator, result)
+      facilitator.speakCount += 1
       participants.forEach((agent) => {
-        agent.handRaiseIntensity = 0;
-      });
+        agent.handRaiseIntensity = 0
+      })
 
-      const message = this.recordMessage(session, facilitator, result.response, 'moderation');
-      this.deliverMessage(session, facilitator.id, message);
+      const message = this.recordMessage(session, facilitator, result.response, 'moderation')
+      this.deliverMessage(session, facilitator.id, message)
 
       session.debug = {
         sessionId: session.id,
         turn: session.currentTurn,
         selectedSpeakerId: facilitator.id,
-        dispatchReason: '会議開始時はファシリテーターが冒頭整理を行い、論点と進め方を提示します。',
+        dispatchReason: '会議開始時のため、ファシリテータが最初の論点整理を行いました。',
         facilitator: {
           agentId: facilitator.id,
           runtimeSessionId: facilitator.runtimeSessionId,
-          overview: '会議の目的と進め方を冒頭で整理',
-          rationale: '開始直後は参加者より先にファシリテーターが議題を整える方が議論が安定するため。',
-          nextFocus: '参加者がどの観点から意見を出すべきかを明示',
+          overview: '会議の導入と論点整理',
+          rationale: '初手は前提共有を優先',
+          nextFocus: '参加者が論点ごとに見解を出す',
           selectedAgentId: null,
+          selectedAgentIds: participants.map((agent) => agent.id),
           inviteAgentIds: participants.map((agent) => agent.id),
           interventionPriority: 100,
-          shouldIntervene: true
+          shouldIntervene: true,
+          parallelDispatch: false
         },
         scores: [],
-        workers: workerRuns,
+        workers: [{
+          workerId: `speech:${facilitator.id}`,
+          kind: 'speech',
+          targetAgentId: facilitator.id,
+          startedAt,
+          finishedAt,
+          durationMs: finishedAt - startedAt
+        }],
         agentSessions: session.agents.map((agent) => ({
           agentId: agent.id,
           runtimeSessionId: agent.runtimeSessionId,
@@ -391,16 +472,17 @@ export class MeetingOrchestrator {
           outboxCount: agent.outbox.length
         })),
         log: session.log.slice(-8)
-      };
-      return;
+      }
+
+      return
     }
 
-    const workerRuns: OrchestratorDebugSnapshot['workers'] = [];
+    const workerRuns: OrchestratorDebugSnapshot['workers'] = []
 
     const scoreTasks = participants.map(async (agent) => {
-      const startedAt = Date.now();
-      const score = await this.scoreParticipant(session, agent);
-      const finishedAt = Date.now();
+      const startedAt = Date.now()
+      const score = await this.scoreParticipant(session, agent)
+      const finishedAt = Date.now()
       workerRuns.push({
         workerId: `score:${agent.id}`,
         kind: 'score',
@@ -408,15 +490,15 @@ export class MeetingOrchestrator {
         startedAt,
         finishedAt,
         durationMs: finishedAt - startedAt
-      });
-      return score;
-    });
+      })
+      return score
+    })
 
     const facilitatorTask = facilitator
       ? (async () => {
-          const startedAt = Date.now();
-          const decision = await this.moderateMeeting(session, facilitator);
-          const finishedAt = Date.now();
+          const startedAt = Date.now()
+          const decision = await this.moderateMeeting(session, facilitator)
+          const finishedAt = Date.now()
           workerRuns.push({
             workerId: `moderation:${facilitator.id}`,
             kind: 'moderation',
@@ -424,22 +506,25 @@ export class MeetingOrchestrator {
             startedAt,
             finishedAt,
             durationMs: finishedAt - startedAt
-          });
-          return decision;
+          })
+          return decision
         })()
-      : Promise.resolve<FacilitatorDecision | null>(null);
+      : Promise.resolve<FacilitatorDecision | null>(null)
 
-    const [scores, facilitatorDecision] = await Promise.all([Promise.all(scoreTasks), facilitatorTask]);
+    const [scores, facilitatorDecision] = await Promise.all([Promise.all(scoreTasks), facilitatorTask])
 
     participants.forEach((agent) => {
-      const score = scores.find((entry) => entry.agentId === agent.id);
-      agent.handRaiseIntensity = score?.score ?? 0;
-    });
+      const score = scores.find((entry) => entry.agentId === agent.id)
+      agent.handRaiseIntensity = score?.score ?? 0
+    })
 
     if (facilitatorDecision?.inviteAgentIds.length) {
-      facilitatorDecision.inviteAgentIds.forEach((agentId) => {
-        const target = session.agents.find((agent) => agent.id === agentId);
-        if (!target) return;
+      for (const agentId of facilitatorDecision.inviteAgentIds) {
+        const target = session.agents.find((agent) => agent.id === agentId)
+        if (!target) {
+          continue
+        }
+
         target.inbox = trimMailbox([
           ...target.inbox,
           {
@@ -447,38 +532,65 @@ export class MeetingOrchestrator {
             fromAgentId: facilitator?.id ?? 'facilitator',
             kind: 'facilitator-note',
             content: facilitatorDecision.nextFocus,
-            summary: `ファシリテーター依頼: ${facilitatorDecision.nextFocus}`,
+            summary: `ファシリテータ指示: ${facilitatorDecision.nextFocus}`,
             timestamp: Date.now()
           }
-        ]);
-      });
+        ])
+      }
     }
 
-    const { speaker, dispatchReason } = this.selectSpeaker(session, scores, facilitatorDecision, facilitator);
-    const speechPrompt = this.buildMeetingPrompt(session, speaker, facilitatorDecision, scores);
-    const speechStartedAt = Date.now();
-    const result = await this.runCodex(speaker.model, speechPrompt, speaker.runtimeSessionId ?? undefined);
-    const speechFinishedAt = Date.now();
-    workerRuns.push({
-      workerId: `speech:${speaker.id}`,
-      kind: 'speech',
-      targetAgentId: speaker.id,
-      startedAt: speechStartedAt,
-      finishedAt: speechFinishedAt,
-      durationMs: speechFinishedAt - speechStartedAt
-    });
+    const { speakers, dispatchReason } = this.selectSpeakers(session, scores, facilitatorDecision, facilitator)
+    const plannedSpeakers = [...speakers]
 
-    speaker.runtimeSessionId = result.sessionId;
-    speaker.speakCount += 1;
+    const speechRuns = await Promise.all(
+      plannedSpeakers.map(async (speaker) => {
+        const prompt = this.buildMeetingPrompt(session, speaker, facilitatorDecision, scores)
+        const startedAt = Date.now()
+        const result = await this.runCli({
+          provider: speaker.provider,
+          model: speaker.model,
+          reasoningEffort: speaker.reasoningEffort,
+          prompt,
+          sessionId: speaker.runtimeSessionId ?? undefined
+        })
+        const finishedAt = Date.now()
+        return { speaker, result, startedAt, finishedAt }
+      })
+    )
 
-    const kind = speaker.role === 'Facilitator' ? 'moderation' : 'message';
-    const message = this.recordMessage(session, speaker, result.response, kind);
-    this.deliverMessage(session, speaker.id, message);
+    for (const speech of speechRuns) {
+      workerRuns.push({
+        workerId: `speech:${speech.speaker.id}`,
+        kind: 'speech',
+        targetAgentId: speech.speaker.id,
+        startedAt: speech.startedAt,
+        finishedAt: speech.finishedAt,
+        durationMs: speech.finishedAt - speech.startedAt
+      })
+    }
+
+    for (const speech of speechRuns) {
+      applyResultToAgent(speech.speaker, speech.result)
+      speech.speaker.speakCount += 1
+    }
+
+    const newMessages = speechRuns.map((speech) =>
+      this.recordMessage(
+        session,
+        speech.speaker,
+        speech.result.response,
+        speech.speaker.role === 'Facilitator' ? 'moderation' : 'message'
+      )
+    )
+
+    for (let index = 0; index < speechRuns.length; index += 1) {
+      this.deliverMessage(session, speechRuns[index].speaker.id, newMessages[index])
+    }
 
     session.debug = {
       sessionId: session.id,
       turn: session.currentTurn,
-      selectedSpeakerId: speaker.id,
+      selectedSpeakerId: speechRuns[0]?.speaker.id ?? null,
       dispatchReason,
       facilitator: facilitator && facilitatorDecision ? {
         agentId: facilitator.id,
@@ -487,9 +599,11 @@ export class MeetingOrchestrator {
         rationale: facilitatorDecision.rationale,
         nextFocus: facilitatorDecision.nextFocus,
         selectedAgentId: facilitatorDecision.selectedAgentId,
+        selectedAgentIds: facilitatorDecision.selectedAgentIds,
         inviteAgentIds: facilitatorDecision.inviteAgentIds,
         interventionPriority: facilitatorDecision.interventionPriority,
-        shouldIntervene: facilitatorDecision.shouldIntervene
+        shouldIntervene: facilitatorDecision.shouldIntervene,
+        parallelDispatch: facilitatorDecision.parallelDispatch
       } : null,
       scores,
       workers: workerRuns,
@@ -500,54 +614,68 @@ export class MeetingOrchestrator {
         outboxCount: agent.outbox.length
       })),
       log: session.log.slice(-8)
-    };
+    }
   }
 
   private async finalizeSession(session: MeetingSession): Promise<void> {
     if (session.finalConclusion) {
-      session.status = 'finished';
-      return;
+      session.status = 'finished'
+      return
     }
 
-    const facilitator = session.agents.find((agent) => agent.role === 'Facilitator') ?? session.agents[0];
-    const transcript = getRecentTranscript(session, 20);
-    const prompt = `あなたは会議全体を取りまとめる役割です。テーマ「${session.topic}」についての議論を収束させてください。` +
-      ` 次の形式で日本語でまとめてください: 1. 総括サマリー 2. 共通認識 3. 未解決論点 4. 次のアクション。` +
-      ` 共通認識は議論内で繰り返し現れた順に並べ、次のアクションは特に重要なものを最大5件までに絞ってください。` +
-      ` 議論ログ: ${transcript}`;
-    const startedAt = Date.now();
-    const result = await this.runCodex(facilitator.model, prompt, facilitator.runtimeSessionId ?? undefined);
-    const finishedAt = Date.now();
-    facilitator.runtimeSessionId = result.sessionId;
-    session.finalConclusion = result.response;
-    session.status = 'finished';
+    const synthesizer = session.agents.find((agent) => agent.role === 'Facilitator') ?? session.agents[0]
+    const transcript = getRecentTranscript(session, 20)
+    const prompt = [
+      getSharedPromptContext(session),
+      'これまでの議論をもとに最終結論を日本語でまとめてください。',
+      '次の4見出しをこの順番で必ず含めてください: 1. 結論サマリー 2. 共通認識 3. 残課題 4. 次のアクション',
+      '各セクションは簡潔だが具体的に書いてください。',
+      `議論ログ: ${transcript}`
+    ].join('\n\n')
+
+    const startedAt = Date.now()
+    const result = await this.runCli({
+      provider: synthesizer.provider,
+      model: synthesizer.model,
+      reasoningEffort: synthesizer.reasoningEffort,
+      prompt,
+      sessionId: synthesizer.runtimeSessionId ?? undefined
+    })
+    const finishedAt = Date.now()
+
+    applyResultToAgent(synthesizer, result)
+    session.finalConclusion = result.response
+    session.status = 'finished'
     session.log.push({
       turn: session.currentTurn,
       kind: 'synthesis',
       summary: summarizeResponse(result.response),
       timestamp: Date.now()
-    });
+    })
+
     session.debug = {
       sessionId: session.id,
       turn: session.currentTurn,
       selectedSpeakerId: null,
-      dispatchReason: '規定ターンに達したため、ファシリテーターが会議を収束して結論を生成しました。',
-      facilitator: facilitator ? {
-        agentId: facilitator.id,
-        runtimeSessionId: facilitator.runtimeSessionId,
-        overview: '会議全体を最終集約',
-        rationale: '規定ターン到達により合意形成と総括を実施',
+      dispatchReason: 'ターン上限に到達したため最終結論を生成しました。',
+      facilitator: synthesizer ? {
+        agentId: synthesizer.id,
+        runtimeSessionId: synthesizer.runtimeSessionId,
+        overview: '議論全体の要約',
+        rationale: '終了条件に到達したため総括を作成',
         nextFocus: '最終結論の提示',
         selectedAgentId: null,
+        selectedAgentIds: [],
         inviteAgentIds: [],
         interventionPriority: 100,
-        shouldIntervene: true
+        shouldIntervene: true,
+        parallelDispatch: false
       } : null,
       scores: [],
       workers: [{
-        workerId: `synthesis:${facilitator.id}`,
+        workerId: `synthesis:${synthesizer.id}`,
         kind: 'synthesis',
-        targetAgentId: facilitator.id,
+        targetAgentId: synthesizer.id,
         startedAt,
         finishedAt,
         durationMs: finishedAt - startedAt
@@ -559,108 +687,190 @@ export class MeetingOrchestrator {
         outboxCount: agent.outbox.length
       })),
       log: session.log.slice(-8)
-    };
+    }
   }
 
   private buildConversationPrompt(session: MeetingSession, speaker: RuntimeAgent): string {
-    const transcript = getRecentTranscript(session, 8);
-    const inboxText = speaker.inbox.slice(-4).map((item) => item.summary).join(' / ');
-    if (session.messages.length === 0) {
-      return `テーマ「${session.topic}」について2人で対話を始めます。あなたは「${speaker.stance}」の立場、性格は「${speaker.personality}」です。` +
-        ` 相手が受け取りやすいトーンで、最初の見解を2〜3文で述べてください。`;
+    const transcript = getRecentTranscript(session, 8)
+    const inboxText = speaker.inbox.slice(-4).map((item) => item.summary).join(' / ')
+
+    const parts = [
+      getSharedPromptContext(session),
+      `あなたは ${speaker.name} です。立場: ${speaker.stance}。性格: ${speaker.personality}。`,
+      buildReasoningGuidance(speaker.reasoningEffort)
+    ]
+
+    if (session.messages.length > 0) {
+      parts.push(`直近の会話: ${transcript}`)
     }
 
-    return `テーマ「${session.topic}」について2人で対話中です。あなたは「${speaker.stance}」の立場、性格は「${speaker.personality}」です。` +
-      ` 最近の対話: ${transcript}` +
-      (inboxText ? ` 受け取っている論点: ${inboxText}` : '') +
-      ` 相手の論点を一度受け止めてから、賛成・懸念・補足のいずれかを明確にし、次の応答が続くように問いを1つ添えて2〜3文で返答してください。`;
+    if (inboxText) {
+      parts.push(`受信メモ: ${inboxText}`)
+    }
+
+    parts.push('会話相手に返す短めの一発言を日本語で返してください。2〜4文で十分です。')
+    return parts.join('\n\n')
   }
 
   private async scoreParticipant(session: MeetingSession, agent: RuntimeAgent): Promise<ScoreDecision> {
-    const transcript = getRecentTranscript(session, 8);
-    const inboxText = agent.inbox.slice(-5).map((item) => item.summary).join(' / ');
-    const prompt = `あなたは会議参加者「${agent.name}」です。スタンスは「${agent.stance}」、性格は「${agent.personality}」です。` +
-      ` テーマは「${session.topic}」です。最近の議論: ${transcript || 'まだ開始直後です。'}` +
-      (inboxText ? ` あなたの inbox: ${inboxText}` : '') +
-      ` 今この瞬間に発言したい度合いを、以下の JSON だけで返してください。` +
-      ` {"score":0-100,"confidence":0-100,"desiredAction":"agree|challenge|question|synthesize","reason":"短い説明"}`;
-    const result = await this.runCodex(agent.model, prompt, agent.runtimeSessionId ?? undefined);
-    agent.runtimeSessionId = result.sessionId;
-    const parsed = extractJson<{ score?: number; confidence?: number; desiredAction?: string; reason?: string }>(result.response);
+    const transcript = getRecentTranscript(session, 8)
+    const inboxText = agent.inbox.slice(-5).map((item) => item.summary).join(' / ')
+    const prompt = [
+      getSharedPromptContext(session),
+      `あなたは採点係です。対象エージェントは ${agent.name}。立場: ${agent.stance}。性格: ${agent.personality}。`,
+      buildReasoningGuidance(agent.reasoningEffort),
+      `直近の議論: ${transcript || 'まだ議論は始まっていません。'}`,
+      inboxText ? `受信メモ: ${inboxText}` : '',
+      'このエージェントが今ターンに発言すべき強さを JSON のみで返してください。',
+      '{"score":0-100,"confidence":0-100,"desiredAction":"agree|challenge|question|synthesize|implement","reason":"短い理由"}'
+    ].filter(Boolean).join('\n\n')
+
+    const result = await this.runCli({
+      provider: agent.provider,
+      model: agent.model,
+      reasoningEffort: agent.reasoningEffort,
+      prompt,
+      sessionId: agent.runtimeSessionId ?? undefined
+    })
+
+    applyResultToAgent(agent, result)
+
+    const parsed = extractJson<{ score?: number; confidence?: number; desiredAction?: string; reason?: string }>(result.response)
     return {
       agentId: agent.id,
       runtimeSessionId: agent.runtimeSessionId,
       score: clamp(parsed?.score ?? 40, 0, 100),
       confidence: clamp(parsed?.confidence ?? 50, 0, 100),
       desiredAction: parsed?.desiredAction ?? 'question',
-      reason: parsed?.reason ?? '追加発言の必要性を要約できませんでした。'
-    };
+      reason: parsed?.reason ?? '発言必要度の理由が不足していたため既定値を使用'
+    }
   }
 
   private async moderateMeeting(session: MeetingSession, facilitator: RuntimeAgent): Promise<FacilitatorDecision> {
-    const transcript = getRecentTranscript(session, 10);
+    const transcript = getRecentTranscript(session, 10)
     const participantState = session.agents
       .filter((agent) => agent.role === 'Participant')
-      .map((agent) => `${agent.name}: 発言${agent.speakCount}回, inbox${agent.inbox.length}件, stance=${agent.stance}, personality=${agent.personality}`)
-      .join(' | ');
-    const prompt = `あなたは会議のファシリテーターです。テーマは「${session.topic}」です。` +
-      ` 参加者状態: ${participantState}` +
-      ` 最近の議論: ${transcript || 'まだ議論開始直後です。'}` +
-      ` 次に誰を話させるべきか、また自分が介入すべきかを判断し、以下の JSON だけを返してください。` +
-      ` {"overview":"現状の整理","rationale":"判断理由","nextFocus":"次に深掘りすべき論点","selectedAgentId":"agent-id or null","inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false}`;
-    const result = await this.runCodex(facilitator.model, prompt, facilitator.runtimeSessionId ?? undefined);
-    facilitator.runtimeSessionId = result.sessionId;
-    const parsed = extractJson<Partial<FacilitatorDecision>>(result.response);
+      .map((agent) => `${agent.name}: 発言${agent.speakCount}回, stance=${agent.stance}, personality=${agent.personality}`)
+      .join(' | ')
+
+    const prompt = [
+      getSharedPromptContext(session),
+      `あなたは会議のファシリテータ ${facilitator.name} です。`,
+      buildReasoningGuidance(facilitator.reasoningEffort),
+      `参加者の状態: ${participantState}`,
+      `直近の議論: ${transcript || 'まだ議論は始まっていません。'}`,
+      '必要なら複数担当者へ同時に話題を振ってください。',
+      '次の JSON のみを返してください。',
+      '{"overview":"現状整理","rationale":"判断理由","nextFocus":"次に進める論点","selectedAgentId":"agent-id or null","selectedAgentIds":["agent-id"],"inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false,"parallelDispatch":true|false}'
+    ].join('\n\n')
+
+    const result = await this.runCli({
+      provider: facilitator.provider,
+      model: facilitator.model,
+      reasoningEffort: facilitator.reasoningEffort,
+      prompt,
+      sessionId: facilitator.runtimeSessionId ?? undefined
+    })
+
+    applyResultToAgent(facilitator, result)
+
+    const parsed = extractJson<Partial<FacilitatorDecision>>(result.response)
+    const selectedAgentIds = Array.isArray(parsed?.selectedAgentIds) ? parsed!.selectedAgentIds.filter(Boolean) : []
+    const inviteAgentIds = Array.isArray(parsed?.inviteAgentIds) ? parsed!.inviteAgentIds.filter(Boolean) : []
+
     return {
-      overview: parsed?.overview ?? '現状の整理を取得できませんでした。',
-      rationale: parsed?.rationale ?? '判断理由を取得できませんでした。',
-      nextFocus: parsed?.nextFocus ?? '論点整理を継続',
+      overview: parsed?.overview ?? '現状整理を取得できませんでした',
+      rationale: parsed?.rationale ?? '判断理由を取得できませんでした',
+      nextFocus: parsed?.nextFocus ?? '次の論点を明示してください',
       selectedAgentId: parsed?.selectedAgentId ?? null,
-      inviteAgentIds: Array.isArray(parsed?.inviteAgentIds) ? parsed!.inviteAgentIds : [],
+      selectedAgentIds,
+      inviteAgentIds,
       interventionPriority: clamp(parsed?.interventionPriority ?? 40, 0, 100),
-      shouldIntervene: Boolean(parsed?.shouldIntervene)
-    };
+      shouldIntervene: Boolean(parsed?.shouldIntervene),
+      parallelDispatch: Boolean(parsed?.parallelDispatch) || selectedAgentIds.length > 1
+    }
   }
 
-  private selectSpeaker(
+  private selectSpeakers(
     session: MeetingSession,
     scores: ScoreDecision[],
     facilitatorDecision: FacilitatorDecision | null,
     facilitator: RuntimeAgent | null
-  ): { speaker: RuntimeAgent; dispatchReason: string } {
-    const participants = session.agents.filter((agent) => agent.role === 'Participant');
+  ): { speakers: RuntimeAgent[]; dispatchReason: string } {
+    const participants = session.agents.filter((agent) => agent.role === 'Participant')
     const ranked = participants
       .map((agent) => {
-        const score = scores.find((entry) => entry.agentId === agent.id);
-        const facilitatorBoost = facilitatorDecision?.selectedAgentId === agent.id ? 20 : 0;
+        const score = scores.find((entry) => entry.agentId === agent.id)
+        const facilitatorBoost = facilitatorDecision?.selectedAgentIds.includes(agent.id) || facilitatorDecision?.selectedAgentId === agent.id ? 20 : 0
         return {
           agent,
           baseScore: score?.score ?? 0,
           adjustedScore: (score?.score ?? 0) + facilitatorBoost,
           reason: score?.reason ?? '理由なし'
-        };
+        }
       })
-      .sort((left, right) => right.adjustedScore - left.adjustedScore);
+      .sort((left, right) => right.adjustedScore - left.adjustedScore)
 
-    const bestParticipant = ranked[0]?.agent ?? session.agents[0];
     if (
       facilitator &&
       facilitatorDecision?.shouldIntervene &&
       facilitatorDecision.interventionPriority >= (ranked[0]?.adjustedScore ?? 0)
     ) {
       return {
-        speaker: facilitator,
-        dispatchReason: `ファシリテーターが介入を優先。理由: ${facilitatorDecision.rationale}`
-      };
+        speakers: [facilitator],
+        dispatchReason: `ファシリテータ介入を優先: ${facilitatorDecision.rationale}`
+      }
     }
 
-    const topReason = ranked[0] ? `${ranked[0].agent.name} を選出。score=${ranked[0].adjustedScore} (${ranked[0].reason})` : '参加者が見つかりませんでした。';
+    const explicitlySelectedIds = facilitatorDecision?.selectedAgentIds.filter((id) =>
+      participants.some((agent) => agent.id === id)
+    ) ?? []
+
+    const fallbackSelectedIds = facilitatorDecision?.selectedAgentId
+      ? [facilitatorDecision.selectedAgentId].filter((id) => participants.some((agent) => agent.id === id))
+      : []
+
+    const parallelIds = facilitatorDecision?.parallelDispatch
+      ? (explicitlySelectedIds.length > 0
+          ? explicitlySelectedIds
+          : facilitatorDecision?.inviteAgentIds.filter((id) => participants.some((agent) => agent.id === id)) ?? [])
+      : []
+
+    const selectedIds = explicitlySelectedIds.length > 0
+      ? explicitlySelectedIds
+      : parallelIds.length > 1
+        ? parallelIds
+        : fallbackSelectedIds.length > 0
+          ? fallbackSelectedIds
+          : ranked.slice(0, 1).map((entry) => entry.agent.id)
+
+    const speakers = selectedIds
+      .map((agentId) => participants.find((agent) => agent.id === agentId) ?? null)
+      .filter((agent): agent is RuntimeAgent => agent !== null)
+
+    if (speakers.length === 0) {
+      return {
+        speakers: ranked.length > 0 ? [ranked[0].agent] : [session.agents[0]],
+        dispatchReason: '候補が空だったため最高スコアの参加者を選択しました。'
+      }
+    }
+
+    if (speakers.length > 1) {
+      const speakerNames = speakers.map((agent) => agent.name).join(', ')
+      return {
+        speakers,
+        dispatchReason: `ファシリテータが複数担当者へ同時依頼: ${speakerNames}`
+      }
+    }
+
+    const topReason = ranked[0]
+      ? `${ranked[0].agent.name} を選択。score=${ranked[0].adjustedScore} (${ranked[0].reason})`
+      : '候補情報なし'
+
     return {
-      speaker: bestParticipant,
-      dispatchReason: facilitatorDecision?.selectedAgentId === bestParticipant.id
-        ? `${topReason}。ファシリテーター推薦を反映。`
-        : topReason
-    };
+      speakers,
+      dispatchReason: topReason
+    }
   }
 
   private buildMeetingPrompt(
@@ -669,23 +879,32 @@ export class MeetingOrchestrator {
     facilitatorDecision: FacilitatorDecision | null,
     scores: ScoreDecision[]
   ): string {
-    const transcript = getRecentTranscript(session, 10);
-    const inboxText = speaker.inbox.slice(-5).map((item) => item.summary).join(' / ');
+    const transcript = getRecentTranscript(session, 10)
+    const inboxText = speaker.inbox.slice(-5).map((item) => item.summary).join(' / ')
+
     if (speaker.role === 'Facilitator') {
-      return `あなたは会議のファシリテーターです。テーマは「${session.topic}」です。` +
-        ` 現在の整理: ${facilitatorDecision?.overview ?? '整理情報なし'}` +
-        ` 次の焦点: ${facilitatorDecision?.nextFocus ?? '論点整理'}` +
-        ` 最近の議論: ${transcript || 'まだ開始直後です。'}` +
-        ` 参加者に問いかけたり論点を整理したりして、会議を前進させる2〜3文を返してください。`;
+      return [
+        getSharedPromptContext(session),
+        `あなたはファシリテータ ${speaker.name} です。`,
+        buildReasoningGuidance(speaker.reasoningEffort),
+        `現在の整理: ${facilitatorDecision?.overview ?? '未整理'}`,
+        `次の焦点: ${facilitatorDecision?.nextFocus ?? '論点を再整理してください'}`,
+        `直近の議論: ${transcript || 'まだ議論は始まっていません。'}`,
+        '次に進めるための短い進行発話を日本語で返してください。'
+      ].join('\n\n')
     }
 
-    const scoreInfo = scores.find((entry) => entry.agentId === speaker.id);
-    return `あなたは会議参加者「${speaker.name}」です。スタンスは「${speaker.stance}」、性格は「${speaker.personality}」です。` +
-      ` テーマは「${session.topic}」です。最近の議論: ${transcript || 'まだ開始直後です。'}` +
-      (facilitatorDecision ? ` ファシリテーター整理: ${facilitatorDecision.overview}。次の焦点: ${facilitatorDecision.nextFocus}。` : '') +
-      (inboxText ? ` あなたの inbox: ${inboxText}` : '') +
-      (scoreInfo ? ` あなたが今話したい理由: ${scoreInfo.reason} (${scoreInfo.desiredAction})。` : '') +
-      ` 他者の発言に具体的に触れながら、2〜3文で会議を前に進める発言をしてください。`;
+    const scoreInfo = scores.find((entry) => entry.agentId === speaker.id)
+    return [
+      getSharedPromptContext(session),
+      `あなたは ${speaker.name} です。立場: ${speaker.stance}。性格: ${speaker.personality}。`,
+      buildReasoningGuidance(speaker.reasoningEffort),
+      `直近の議論: ${transcript || 'まだ議論は始まっていません。'}`,
+      facilitatorDecision ? `ファシリテータ整理: ${facilitatorDecision.overview}\n次の焦点: ${facilitatorDecision.nextFocus}` : '',
+      inboxText ? `受信メモ: ${inboxText}` : '',
+      scoreInfo ? `期待される行動: ${scoreInfo.desiredAction} / 理由: ${scoreInfo.reason}` : '',
+      '会議を前に進める具体的な一発言を日本語で返してください。2〜5文で十分です。'
+    ].filter(Boolean).join('\n\n')
   }
 
   private recordMessage(
@@ -700,15 +919,17 @@ export class MeetingOrchestrator {
       content,
       summary: summarizeResponse(content),
       timestamp: Date.now()
-    };
-    session.messages.push(message);
+    }
+
+    session.messages.push(message)
     session.log.push({
       turn: session.currentTurn,
       kind,
       summary: message.summary,
       timestamp: message.timestamp
-    });
-    return message;
+    })
+
+    return message
   }
 
   private deliverMessage(session: MeetingSession, speakerId: string, message: MessageRecord): void {
@@ -720,13 +941,13 @@ export class MeetingOrchestrator {
         content: message.content,
         summary: message.summary,
         timestamp: message.timestamp
-      };
+      }
 
       if (agent.id === speakerId) {
-        agent.outbox = trimMailbox([...agent.outbox, envelope]);
+        agent.outbox = trimMailbox([...agent.outbox, envelope])
       } else {
-        agent.inbox = trimMailbox([...agent.inbox, envelope]);
+        agent.inbox = trimMailbox([...agent.inbox, envelope])
       }
-    });
+    })
   }
 }

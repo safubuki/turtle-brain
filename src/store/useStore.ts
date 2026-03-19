@@ -1,450 +1,700 @@
-import { create } from 'zustand';
+import { create } from 'zustand'
 
-// エージェントの役割
-export type AgentRole = 'Participant' | 'Facilitator';
+export type AgentRole = 'Participant' | 'Facilitator'
+export type HandRaiseMode = 'rule-based' | 'ai-evaluation'
+export type ExecutionMode = 'orchestration' | 'autonomous'
+export type DiscussionStyle = 'conversation' | 'meeting'
+export type AgentCliProvider = 'codex' | 'gemini' | 'copilot'
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
-// 挙手判定方式
-export type HandRaiseMode = 'rule-based' | 'ai-evaluation';
-
-// 実行モード
-export type ExecutionMode = 'orchestration' | 'autonomous';
-
-// 討議スタイル
-export type DiscussionStyle = 'conversation' | 'meeting';
-
-// エージェントのデータ構造
-export interface AgentProfile {
-  id: string;
-  name: string;
-  role: AgentRole;
-  stance: string;        // 例: 建設的、批判的
-  personality: string;   // 例: 声が大きい、データ重視
-  model: string;         // 使用言語モデル
-  runtimeSessionId: string | null;
-  // UI用の一時的なステータス状態
-  status: 'idle' | 'thinking' | 'speaking' | 'raising_hand';
-  handRaiseIntensity: number; // 挙手の強さ (0〜100)
-  speakCount: number;         // 発言回数
+export interface RateLimitWindow {
+  remaining: number | null
+  limit: number | null
+  resetAt: string | null
 }
 
-// 1つの発言（メッセージ）のデータ
+export interface AgentRateLimits {
+  daily: RateLimitWindow | null
+  weekly: RateLimitWindow | null
+  source: string | null
+}
+
+export interface ProviderModelInfo {
+  id: string
+  name: string
+  description?: string
+  supportedReasoningEfforts: ReasoningEffort[]
+  defaultReasoningEffort: ReasoningEffort | null
+  billingMultiplier: number | null
+}
+
+export interface ProviderCatalog {
+  provider: AgentCliProvider
+  label: string
+  source: string
+  fetchedAt: string | null
+  available: boolean
+  models: ProviderModelInfo[]
+  error: string | null
+}
+
+export type ProviderCatalogMap = Record<AgentCliProvider, ProviderCatalog>
+
+export interface AgentProfile {
+  id: string
+  name: string
+  role: AgentRole
+  stance: string
+  personality: string
+  provider: AgentCliProvider
+  model: string
+  reasoningEffort: ReasoningEffort
+  runtimeSessionId: string | null
+  rateLimits: AgentRateLimits | null
+  status: 'idle' | 'thinking' | 'speaking' | 'raising_hand'
+  handRaiseIntensity: number
+  speakCount: number
+}
+
 export interface Message {
-  id: string;
-  agentId: string;
-  content: string;
-  summary: string;   // この発言の要約（カラム冒頭に表示）
-  timestamp: number;
+  id: string
+  agentId: string
+  content: string
+  summary: string
+  timestamp: number
 }
 
 export interface OrchestrationDebug {
-  sessionId: string;
-  turn: number;
-  selectedSpeakerId: string | null;
-  dispatchReason: string;
+  sessionId: string
+  turn: number
+  selectedSpeakerId: string | null
+  dispatchReason: string
   facilitator: {
-    agentId: string;
-    runtimeSessionId: string | null;
-    overview: string;
-    rationale: string;
-    nextFocus: string;
-    selectedAgentId: string | null;
-    inviteAgentIds: string[];
-    interventionPriority: number;
-    shouldIntervene: boolean;
-  } | null;
+    agentId: string
+    runtimeSessionId: string | null
+    overview: string
+    rationale: string
+    nextFocus: string
+    selectedAgentId: string | null
+    selectedAgentIds: string[]
+    inviteAgentIds: string[]
+    interventionPriority: number
+    shouldIntervene: boolean
+    parallelDispatch: boolean
+  } | null
   scores: Array<{
-    agentId: string;
-    runtimeSessionId: string | null;
-    score: number;
-    confidence: number;
-    desiredAction: string;
-    reason: string;
-  }>;
+    agentId: string
+    runtimeSessionId: string | null
+    score: number
+    confidence: number
+    desiredAction: string
+    reason: string
+  }>
   workers: Array<{
-    workerId: string;
-    kind: 'score' | 'moderation' | 'speech' | 'synthesis';
-    targetAgentId?: string;
-    startedAt: number;
-    finishedAt: number;
-    durationMs: number;
-  }>;
+    workerId: string
+    kind: 'score' | 'moderation' | 'speech' | 'synthesis'
+    targetAgentId?: string
+    startedAt: number
+    finishedAt: number
+    durationMs: number
+  }>
   agentSessions: Array<{
-    agentId: string;
-    runtimeSessionId: string | null;
-    inboxCount: number;
-    outboxCount: number;
-  }>;
+    agentId: string
+    runtimeSessionId: string | null
+    inboxCount: number
+    outboxCount: number
+  }>
   log: Array<{
-    turn: number;
-    kind: 'message' | 'moderation' | 'synthesis';
-    summary: string;
-    timestamp: number;
-  }>;
+    turn: number
+    kind: 'message' | 'moderation' | 'synthesis'
+    summary: string
+    timestamp: number
+  }>
 }
 
-// 全体のストア状態
 interface TurtleBrainState {
-  // 設定関連
-  agents: AgentProfile[];
-  topic: string;
-  turnLimit: number;
-  currentTurn: number;
-  environment: 'sandbox' | 'full';
-  handRaiseMode: HandRaiseMode;
-  executionMode: ExecutionMode;
-  discussionStyle: DiscussionStyle;
-  
-  // 対話・議論データ
-  messages: Message[];
-  sessionStatus: 'idle' | 'running' | 'finished';
-  finalConclusion: string | null;
-  sessionError: string | null;
-  backendSessionId: string | null;
-  orchestrationDebug: OrchestrationDebug | null;
-
-  // アクション操作
-  setTopic: (topic: string) => void;
-  setExecutionMode: (mode: ExecutionMode) => void;
-  setDiscussionStyle: (style: DiscussionStyle) => void;
-  setHandRaiseMode: (mode: HandRaiseMode) => void;
-  setTurnLimit: (limit: number) => void;
-  addAgent: (agent: AgentProfile) => void;
-  updateAgent: (id: string, updates: Partial<AgentProfile>) => void;
-  removeAgent: (id: string) => void;
-  resetAgentsToDefault: () => void;
-  resetAgentToDefault: (id: string) => void;
-  
-  startSession: (topic: string) => void;
-  stopSession: () => void;
-  addMessage: (message: Message) => void;
-  clearSessionError: () => void;
-  resetSession: () => void;
-  processNextTurn: () => Promise<void>;
-  generateFinalConclusion: () => Promise<void>;
+  agents: AgentProfile[]
+  topic: string
+  inputPaths: string[]
+  turnLimit: number
+  currentTurn: number
+  environment: 'sandbox' | 'full'
+  handRaiseMode: HandRaiseMode
+  executionMode: ExecutionMode
+  discussionStyle: DiscussionStyle
+  messages: Message[]
+  sessionStatus: 'idle' | 'running' | 'finished'
+  finalConclusion: string | null
+  sessionError: string | null
+  backendSessionId: string | null
+  orchestrationDebug: OrchestrationDebug | null
+  providerCatalogs: ProviderCatalogMap
+  providerCatalogStatus: 'idle' | 'loading' | 'ready' | 'error'
+  providerCatalogError: string | null
+  setTopic: (topic: string) => void
+  setInputPaths: (paths: string[]) => void
+  setExecutionMode: (mode: ExecutionMode) => void
+  setDiscussionStyle: (style: DiscussionStyle) => void
+  setHandRaiseMode: (mode: HandRaiseMode) => void
+  setTurnLimit: (limit: number) => void
+  addAgent: (agent: AgentProfile) => void
+  updateAgent: (id: string, updates: Partial<AgentProfile>) => void
+  removeAgent: (id: string) => void
+  resetAgentsToDefault: () => void
+  resetAgentToDefault: (id: string) => void
+  refreshProviderCatalogs: (force?: boolean) => Promise<void>
+  startSession: (topic: string, inputPaths?: string[]) => void
+  stopSession: () => void
+  clearSessionError: () => void
+  resetSession: () => void
+  processNextTurn: () => Promise<void>
 }
 
-function getAgentInteractionErrorMessage(error: unknown, details?: string): string {
-  if (details) {
-    return `エージェント呼び出し失敗: ${details}`;
+function createEmptyRateLimits(): AgentRateLimits {
+  return {
+    daily: null,
+    weekly: null,
+    source: null
   }
+}
 
-  if (error instanceof TypeError) {
-    return 'バックエンド未起動の可能性があります。server を起動してから再実行してください。';
+function createProviderModel(
+  id: string,
+  name: string,
+  options?: {
+    description?: string
+    supportedReasoningEfforts?: ReasoningEffort[]
+    defaultReasoningEffort?: ReasoningEffort | null
+    billingMultiplier?: number | null
   }
-
-  if (error instanceof Error && error.message) {
-    return `エージェント呼び出し失敗: ${error.message}`;
+): ProviderModelInfo {
+  return {
+    id,
+    name,
+    description: options?.description,
+    supportedReasoningEfforts: options?.supportedReasoningEfforts ?? [],
+    defaultReasoningEffort: options?.defaultReasoningEffort ?? null,
+    billingMultiplier: options?.billingMultiplier ?? null
   }
+}
 
-  return 'エージェント呼び出しに失敗しました。';
+function createFallbackProviderCatalogs(): ProviderCatalogMap {
+  return {
+    codex: {
+      provider: 'codex',
+      label: 'Codex CLI',
+      source: 'fallback',
+      fetchedAt: null,
+      available: true,
+      error: null,
+      models: [
+        createProviderModel('gpt-5.4', 'gpt-5.4', {
+          description: 'Latest frontier agentic coding model.',
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.4-mini', 'gpt-5.4-mini', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.3-codex', 'gpt-5.3-codex', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.2-codex', 'gpt-5.2-codex', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.2', 'gpt-5.2', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.1-codex-max', 'gpt-5.1-codex-max', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.1-codex', 'gpt-5.1-codex', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.1', 'gpt-5.1', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.1-codex-mini', 'gpt-5.1-codex-mini', {
+          supportedReasoningEfforts: ['medium', 'high'],
+          defaultReasoningEffort: 'medium'
+        })
+      ]
+    },
+    gemini: {
+      provider: 'gemini',
+      label: 'Gemini CLI',
+      source: 'fallback',
+      fetchedAt: null,
+      available: true,
+      error: null,
+      models: [
+        createProviderModel('auto-gemini-3', 'Auto (Gemini 3)'),
+        createProviderModel('auto-gemini-2.5', 'Auto (Gemini 2.5)'),
+        createProviderModel('gemini-3.1-pro-preview', 'Gemini 3.1 Pro Preview'),
+        createProviderModel('gemini-3.1-pro-preview-customtools', 'Gemini 3.1 Pro Preview Custom Tools'),
+        createProviderModel('gemini-3-flash-preview', 'Gemini 3 Flash Preview'),
+        createProviderModel('gemini-3.1-flash-lite-preview', 'Gemini 3.1 Flash Lite Preview'),
+        createProviderModel('gemini-2.5-pro', 'Gemini 2.5 Pro'),
+        createProviderModel('gemini-2.5-flash', 'Gemini 2.5 Flash'),
+        createProviderModel('gemini-2.5-flash-lite', 'Gemini 2.5 Flash Lite')
+      ]
+    },
+    copilot: {
+      provider: 'copilot',
+      label: 'GitHub Copilot CLI',
+      source: 'fallback',
+      fetchedAt: null,
+      available: true,
+      error: null,
+      models: [
+        createProviderModel('claude-sonnet-4.6', 'Claude Sonnet 4.6', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 1
+        }),
+        createProviderModel('claude-opus-4.6', 'Claude Opus 4.6', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'high',
+          billingMultiplier: 3
+        }),
+        createProviderModel('gemini-3-pro-preview', 'Gemini 3 Pro (Preview)', {
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.4', 'GPT-5.4', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.3-codex', 'GPT-5.3-Codex', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.2-codex', 'GPT-5.2-Codex', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'high',
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.2', 'GPT-5.2', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.1-codex-max', 'GPT-5.1-Codex-Max', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.1-codex', 'GPT-5.1-Codex', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.1', 'GPT-5.1', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 1
+        }),
+        createProviderModel('gpt-5.1-codex-mini', 'GPT-5.1-Codex-Mini', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 0.33
+        }),
+        createProviderModel('gpt-5-mini', 'GPT-5 mini', {
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium',
+          billingMultiplier: 0
+        })
+      ]
+    }
+  }
+}
+
+function getDefaultCatalogs(): ProviderCatalogMap {
+  return createFallbackProviderCatalogs()
+}
+
+function cloneCatalogs(catalogs: ProviderCatalogMap): ProviderCatalogMap {
+  return {
+    codex: { ...catalogs.codex, models: catalogs.codex.models.map((model) => ({ ...model })) },
+    gemini: { ...catalogs.gemini, models: catalogs.gemini.models.map((model) => ({ ...model })) },
+    copilot: { ...catalogs.copilot, models: catalogs.copilot.models.map((model) => ({ ...model })) }
+  }
+}
+
+function createAgent(
+  partial: Pick<AgentProfile, 'id' | 'name' | 'role' | 'stance' | 'personality'> &
+    Partial<Pick<AgentProfile, 'provider' | 'model' | 'reasoningEffort'>>
+): AgentProfile {
+  return {
+    provider: partial.provider ?? 'codex',
+    model: partial.model ?? 'gpt-5.4',
+    reasoningEffort: partial.reasoningEffort ?? 'medium',
+    runtimeSessionId: null,
+    rateLimits: createEmptyRateLimits(),
+    status: 'idle',
+    handRaiseIntensity: 0,
+    speakCount: 0,
+    ...partial
+  }
 }
 
 const conversationDefaultAgents: AgentProfile[] = [
-  {
+  createAgent({
     id: 'agent-1',
-    name: 'エージェントA',
+    name: '技術担当',
     role: 'Participant',
-    stance: '建設的・共感的',
-    personality: '前向き・協調的',
-    model: 'gpt-5.4',
-    runtimeSessionId: null,
-    status: 'idle',
-    handRaiseIntensity: 0,
-    speakCount: 0
-  },
-  {
+    stance: '新規性重視 / ユーザー価値重視',
+    personality: '率直・論理的 / 高速・実務的',
+    provider: 'codex',
+    model: 'gpt-5.4'
+  }),
+  createAgent({
     id: 'agent-2',
-    name: 'エージェントB',
+    name: '品質担当',
     role: 'Participant',
-    stance: '探究的・批判的',
-    personality: '慎重・論理的',
-    model: 'gpt-5.4',
-    runtimeSessionId: null,
-    status: 'idle',
-    handRaiseIntensity: 0,
-    speakCount: 0
-  }
-];
+    stance: '批判的検証 / 品質・リスク管理',
+    personality: '丁寧・堅実 / 慎重・分析的',
+    provider: 'copilot',
+    model: 'gpt-5.2'
+  })
+]
 
-// デフォルトのエージェント（4名: 参加者3名 + ファシリテーター1名）
-const defaultAgents: AgentProfile[] = [
-  {
+const meetingDefaultAgents: AgentProfile[] = [
+  createAgent({
     id: 'agent-1',
-    name: 'エージェントA',
+    name: '技術担当',
     role: 'Participant',
-    stance: '建設的・アイデア出し',
-    personality: '前向き・協調的',
-    model: 'gpt-5.4',
-    runtimeSessionId: null,
-    status: 'idle',
-    handRaiseIntensity: 0,
-    speakCount: 0
-  },
-  {
+    stance: '新規性重視 / コスト最適化',
+    personality: '高速・実務的 / 大胆・発想型',
+    provider: 'codex',
+    model: 'gpt-5.4'
+  }),
+  createAgent({
     id: 'agent-2',
-    name: 'エージェントB',
+    name: '品質担当',
     role: 'Participant',
-    stance: '批判的・リスク分析',
-    personality: '慎重・論理的',
-    model: 'gpt-5.4',
-    runtimeSessionId: null,
-    status: 'idle',
-    handRaiseIntensity: 0,
-    speakCount: 0
-  },
-  {
+    stance: '品質・リスク管理 / 長期運用重視',
+    personality: '丁寧・堅実 / 慎重・分析的',
+    provider: 'copilot',
+    model: 'gpt-5.2'
+  }),
+  createAgent({
     id: 'agent-3',
-    name: 'エージェントC',
+    name: 'ユーザー担当',
     role: 'Participant',
-    stance: '中立・データ重視・ユーザー目線',
-    personality: '分析的・俯瞰的',
-    model: 'gpt-5.4',
-    runtimeSessionId: null,
-    status: 'idle',
-    handRaiseIntensity: 0,
-    speakCount: 0
-  },
-  {
+    stance: 'ユーザー価値重視 / 中立・バランス',
+    personality: 'フレンドリー / 率直・論理的',
+    provider: 'gemini',
+    model: 'gemini-2.5-flash'
+  }),
+  createAgent({
     id: 'moderator',
-    name: 'ファシリテーターエージェント',
+    name: 'ファシリテータ',
     role: 'Facilitator',
-    stance: '中立',
-    personality: '冷静・俯瞰的',
-    model: 'gpt-5.4',
-    runtimeSessionId: null,
-    status: 'idle',
-    handRaiseIntensity: 0,
-    speakCount: 0
-  }
-];
+    stance: '進行管理 / 中立・バランス',
+    personality: '丁寧・堅実 / フレンドリー',
+    provider: 'codex',
+    model: 'gpt-5.4'
+  })
+]
 
 function cloneAgents(agents: AgentProfile[]): AgentProfile[] {
-  return agents.map((agent) => ({ ...agent }));
+  return agents.map((agent) => ({
+    ...agent,
+    rateLimits: agent.rateLimits
+      ? {
+          source: agent.rateLimits.source,
+          daily: agent.rateLimits.daily ? { ...agent.rateLimits.daily } : null,
+          weekly: agent.rateLimits.weekly ? { ...agent.rateLimits.weekly } : null
+        }
+      : createEmptyRateLimits()
+  }))
 }
 
 function getDiscussionStyleDefaults(style: DiscussionStyle): {
-  agents: AgentProfile[];
-  turnLimit: number;
-  handRaiseMode: HandRaiseMode;
+  agents: AgentProfile[]
+  turnLimit: number
+  handRaiseMode: HandRaiseMode
 } {
   if (style === 'conversation') {
     return {
       agents: cloneAgents(conversationDefaultAgents),
       turnLimit: 3,
       handRaiseMode: 'rule-based'
-    };
+    }
   }
 
   return {
-    agents: cloneAgents(defaultAgents),
+    agents: cloneAgents(meetingDefaultAgents),
     turnLimit: 3,
     handRaiseMode: 'rule-based'
-  };
+  }
 }
 
-// ===================================================================
-// Zustand ストア
-// ===================================================================
+function getAgentInteractionErrorMessage(error: unknown, details?: string): string {
+  if (details) {
+    return `エージェント処理に失敗しました: ${details}`
+  }
+
+  if (error instanceof TypeError) {
+    return 'バックエンドへ接続できませんでした。サーバーが起動しているか確認してください。'
+  }
+
+  if (error instanceof Error && error.message) {
+    return `エージェント処理に失敗しました: ${error.message}`
+  }
+
+  return 'エージェント処理で不明なエラーが発生しました。'
+}
+
+function sanitizeAgents(agents: AgentProfile[]): AgentProfile[] {
+  return agents.map((agent) => ({
+    ...agent,
+    runtimeSessionId: null,
+    rateLimits: agent.rateLimits ?? createEmptyRateLimits(),
+    status: 'idle',
+    speakCount: 0,
+    handRaiseIntensity: 0
+  }))
+}
+
+function normalizeCatalog(raw: ProviderCatalog, fallback: ProviderCatalog): ProviderCatalog {
+  const models = (raw.models?.length ? raw.models : fallback.models).map((model) => ({
+    id: model.id,
+    name: model.name || model.id,
+    description: model.description,
+    supportedReasoningEfforts: model.supportedReasoningEfforts ?? [],
+    defaultReasoningEffort: model.defaultReasoningEffort ?? null,
+    billingMultiplier: model.billingMultiplier ?? null
+  }))
+
+  return {
+    provider: raw.provider,
+    label: raw.label || fallback.label,
+    source: raw.source || fallback.source,
+    fetchedAt: raw.fetchedAt ?? null,
+    available: raw.available ?? true,
+    error: raw.error ?? null,
+    models
+  }
+}
+
 export const useStore = create<TurtleBrainState>((set, get) => ({
   agents: cloneAgents(conversationDefaultAgents),
   topic: '',
+  inputPaths: [],
   turnLimit: 3,
   currentTurn: 0,
   environment: 'sandbox',
-  handRaiseMode: 'rule-based', // デフォルトはルールベース
+  handRaiseMode: 'rule-based',
   executionMode: 'orchestration',
   discussionStyle: 'conversation',
-  
   messages: [],
   sessionStatus: 'idle',
   finalConclusion: null,
   sessionError: null,
   backendSessionId: null,
   orchestrationDebug: null,
+  providerCatalogs: getDefaultCatalogs(),
+  providerCatalogStatus: 'idle',
+  providerCatalogError: null,
 
   setTopic: (topic) => set({ topic }),
-  setExecutionMode: (mode) => set(() => ({
-    executionMode: mode,
-    messages: [],
-    currentTurn: 0,
-    finalConclusion: null,
-    sessionError: null,
-    backendSessionId: null,
-    orchestrationDebug: null,
-    sessionStatus: 'idle'
-  })),
-  setDiscussionStyle: (style) => set(() => ({
-    discussionStyle: style,
-    ...getDiscussionStyleDefaults(style),
-    messages: [],
-    currentTurn: 0,
-    finalConclusion: null,
-    sessionError: null,
-    backendSessionId: null,
-    orchestrationDebug: null,
-    sessionStatus: 'idle'
-  })),
-  setHandRaiseMode: (mode) => set({ handRaiseMode: mode }),
-  setTurnLimit: (limit) => set({ turnLimit: limit }),
-  
-  addAgent: (agent) => set((state) => ({ 
-    agents: [...state.agents, agent] 
-  })),
-  
-  updateAgent: (id, updates) => set((state) => ({
-    agents: state.agents.map(a => a.id === id ? { ...a, ...updates } : a)
-  })),
-  
-  removeAgent: (id) => set((state) => ({
-    agents: state.agents.filter(a => a.id !== id)
-  })),
+  setInputPaths: (inputPaths) => set({ inputPaths }),
 
-  // 全エージェントをデフォルトに戻す
-  resetAgentsToDefault: () => set((state) => ({ agents: getDiscussionStyleDefaults(state.discussionStyle).agents })),
-  
-  // 特定のエージェントをデフォルトに戻す
-  resetAgentToDefault: (id) => set((state) => {
-    const defaultAgent = getDiscussionStyleDefaults(state.discussionStyle).agents.find(a => a.id === id);
-    if (!defaultAgent) return state;
-    return {
-      agents: state.agents.map(a => a.id === id ? { ...defaultAgent } : a)
-    };
-  }),
-  startSession: (topic: string) => set((s) => ({
-    topic,
-    sessionStatus: 'running',
-    currentTurn: 1,
-    messages: [],
-    finalConclusion: null,
-    sessionError: null,
-    backendSessionId: null,
-    orchestrationDebug: null,
-    agents: s.agents.map(a => ({ ...a, runtimeSessionId: null, status: 'idle' as const, speakCount: 0, handRaiseIntensity: 0 }))
-  })),
-  stopSession: () => set({ sessionStatus: 'finished' }),
-  addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
-  clearSessionError: () => set({ sessionError: null }),
-  resetSession: () => set((state) => ({
-    topic: '',
-    sessionStatus: 'idle',
-    messages: [],
-    currentTurn: 0,
-    finalConclusion: null,
-    sessionError: null,
-    backendSessionId: null,
-    orchestrationDebug: null,
-    agents: state.agents.map((agent) => ({
-      ...agent,
-      runtimeSessionId: null,
-      status: 'idle' as const,
-      speakCount: 0,
-      handRaiseIntensity: 0
+  setExecutionMode: (executionMode) =>
+    set(() => ({
+      executionMode,
+      messages: [],
+      currentTurn: 0,
+      finalConclusion: null,
+      sessionError: null,
+      backendSessionId: null,
+      orchestrationDebug: null,
+      sessionStatus: 'idle'
+    })),
+
+  setDiscussionStyle: (discussionStyle) =>
+    set(() => ({
+      discussionStyle,
+      ...getDiscussionStyleDefaults(discussionStyle),
+      messages: [],
+      currentTurn: 0,
+      finalConclusion: null,
+      sessionError: null,
+      backendSessionId: null,
+      orchestrationDebug: null,
+      sessionStatus: 'idle'
+    })),
+
+  setHandRaiseMode: (handRaiseMode) => set({ handRaiseMode }),
+  setTurnLimit: (turnLimit) => set({ turnLimit }),
+
+  addAgent: (agent) =>
+    set((state) => ({
+      agents: [...state.agents, { ...agent, rateLimits: agent.rateLimits ?? createEmptyRateLimits() }]
+    })),
+
+  updateAgent: (id, updates) =>
+    set((state) => ({
+      agents: state.agents.map((agent) =>
+        agent.id === id
+          ? {
+              ...agent,
+              ...updates,
+              rateLimits: updates.rateLimits ?? agent.rateLimits
+            }
+          : agent
+      )
+    })),
+
+  removeAgent: (id) =>
+    set((state) => ({
+      agents: state.agents.filter((agent) => agent.id !== id)
+    })),
+
+  resetAgentsToDefault: () =>
+    set((state) => ({
+      agents: getDiscussionStyleDefaults(state.discussionStyle).agents
+    })),
+
+  resetAgentToDefault: (id) =>
+    set((state) => {
+      const defaults = getDiscussionStyleDefaults(state.discussionStyle).agents
+      const defaultAgent = defaults.find((agent) => agent.id === id)
+      if (!defaultAgent) {
+        return state
+      }
+
+      return {
+        agents: state.agents.map((agent) => (agent.id === id ? { ...defaultAgent } : agent))
+      }
+    }),
+
+  refreshProviderCatalogs: async (force = false) => {
+    const fallbackCatalogs = getDefaultCatalogs()
+
+    set((state) => ({
+      providerCatalogStatus: 'loading',
+      providerCatalogError: null,
+      providerCatalogs: state.providerCatalogStatus === 'idle' ? fallbackCatalogs : state.providerCatalogs
     }))
-  })),
 
-  // ===================================================================
-  // メインの議論ループ
-  // ===================================================================
-  processNextTurn: async () => {
-    const state = get();
-    if (state.sessionStatus !== 'running') return;
     try {
-      const res = await fetch('http://localhost:3001/api/orchestrator/run-turn', {
+      const response = await fetch(`http://localhost:3001/api/providers/catalogs${force ? '?refresh=1' : ''}`)
+      const data = await response.json()
+
+      if (!response.ok || !data?.success || !data?.catalogs) {
+        throw new Error(data?.details || data?.error || `HTTP ${response.status}`)
+      }
+
+      const incoming = data.catalogs as ProviderCatalogMap
+      const mergedCatalogs: ProviderCatalogMap = {
+        codex: normalizeCatalog(incoming.codex ?? fallbackCatalogs.codex, fallbackCatalogs.codex),
+        gemini: normalizeCatalog(incoming.gemini ?? fallbackCatalogs.gemini, fallbackCatalogs.gemini),
+        copilot: normalizeCatalog(incoming.copilot ?? fallbackCatalogs.copilot, fallbackCatalogs.copilot)
+      }
+
+      set({
+        providerCatalogs: cloneCatalogs(mergedCatalogs),
+        providerCatalogStatus: 'ready',
+        providerCatalogError: null
+      })
+    } catch (error) {
+      set((state) => ({
+        providerCatalogStatus: 'error',
+        providerCatalogError: error instanceof Error ? error.message : String(error),
+        providerCatalogs: state.providerCatalogs
+      }))
+    }
+  },
+
+  startSession: (topic, inputPaths = []) =>
+    set((state) => ({
+      topic: topic.trim(),
+      inputPaths,
+      sessionStatus: 'running',
+      currentTurn: 1,
+      messages: [],
+      finalConclusion: null,
+      sessionError: null,
+      backendSessionId: null,
+      orchestrationDebug: null,
+      agents: sanitizeAgents(state.agents)
+    })),
+
+  stopSession: () => set({ sessionStatus: 'finished' }),
+
+  clearSessionError: () => set({ sessionError: null }),
+
+  resetSession: () =>
+    set((state) => ({
+      topic: '',
+      inputPaths: [],
+      sessionStatus: 'idle',
+      messages: [],
+      currentTurn: 0,
+      finalConclusion: null,
+      sessionError: null,
+      backendSessionId: null,
+      orchestrationDebug: null,
+      agents: sanitizeAgents(state.agents)
+    })),
+
+  processNextTurn: async () => {
+    const state = get()
+    if (state.sessionStatus !== 'running') {
+      return
+    }
+
+    try {
+      const response = await fetch('http://localhost:3001/api/orchestrator/run-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId: state.backendSessionId,
           topic: state.topic,
+          inputPaths: state.inputPaths,
           discussionStyle: state.discussionStyle,
           turnLimit: state.turnLimit,
           agents: state.agents
         })
-      });
+      })
 
-      const data = await res.json();
+      const data = await response.json()
 
-      if (!res.ok) {
-        throw new Error(data?.details || data?.error || `HTTP ${res.status}`);
+      if (!response.ok) {
+        throw new Error(data?.details || data?.error || `HTTP ${response.status}`)
       }
-      
-      if (data.success) {
-        set({
-          backendSessionId: data.sessionId,
-          agents: data.agents,
-          messages: data.messages,
-          currentTurn: data.currentTurn,
-          sessionStatus: data.sessionStatus,
-          finalConclusion: data.finalConclusion,
-          orchestrationDebug: data.debug,
-          sessionError: null
-        });
-      } else {
-        throw new Error(data.details || data.error);
+
+      if (!data.success) {
+        throw new Error(data.details || data.error || 'Unknown orchestrator error')
       }
-    } catch (e) {
-      console.error('Agent interaction failed:', e);
+
+      set({
+        backendSessionId: data.sessionId,
+        agents: data.agents,
+        messages: data.messages,
+        currentTurn: data.currentTurn,
+        sessionStatus: data.sessionStatus,
+        finalConclusion: data.finalConclusion,
+        orchestrationDebug: data.debug,
+        sessionError: null
+      })
+    } catch (error) {
+      console.error('Agent interaction failed:', error)
       set({
         sessionStatus: 'finished',
-        sessionError: getAgentInteractionErrorMessage(e)
-      });
-    }
-  },
-
-  // ===================================================================
-  // 最終結論の生成
-  // ===================================================================
-  generateFinalConclusion: async () => {
-    const state = get();
-    set({ finalConclusion: '生成中...', sessionError: null });
-
-    try {
-      // 発言のあったエージェントのみ対象
-      const activeAgents = state.agents.filter(a => 
-        state.messages.some(m => m.agentId === a.id) && a.role === 'Participant'
-      );
-
-      const agentSummaries = activeAgents.map(ag => {
-        const agMessages = state.messages.filter(m => m.agentId === ag.id);
-        const agText = agMessages.map((m, i) => `[${i + 1}回目] ${m.content}`).join(' ');
-        return `【${ag.name}（${ag.stance}）】 ${agText}`;
-      }).join(' ---- ');
-
-      const systemPrompt = `テーマ「${state.topic}」について、複数のAIエージェントが議論しました。以下の議論内容をもとに、最終結論をまとめてください。` +
-        ` 重要: 全てのエージェントの意見を公平かつ十分に汲み取ること。建設的な意見だけでなく、批判的・慎重な意見も同等の重みで扱ってください。` +
-        ` 以下の構造で回答してください:` +
-        ` 1. 冒頭に3〜4行の「総括サマリー」を書く（テーマに対する全体的な結論を凝縮）` +
-        ` 2. 「共通認識」のセクション: 全参加者の意見が一致している点を箇条書きで整理` +
-        ` 3. 「対立軸」のセクション: 意見が分かれたポイントを明確に記述し、それぞれの立場の根拠を公平に提示` +
-        ` 4. 「統合的結論」のセクション: 共通認識と対立軸を踏まえた上で、実践的な提言や推奨事項をまとめる` +
-        ` 5. 各ポイントは具体的に書き、曖昧な表現は避けてください。` +
-        ` ---- 議論内容 ---- ${agentSummaries}`;
-
-      const res = await fetch('http://localhost:3001/api/agent/interact', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: systemPrompt,
-          model: 'gpt-5.4'
-        })
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data?.details || data?.error || `HTTP ${res.status}`);
-      }
-      
-      if (data.success) {
-        set({ finalConclusion: data.response });
-      } else {
-        throw new Error(data.details || data.error);
-      }
-    } catch (e) {
-      console.error('Failed to generate final conclusion:', e);
-      set({ 
-        finalConclusion: '最終結論の生成に失敗しました。',
-        sessionError: getAgentInteractionErrorMessage(e)
-      });
+        sessionError: getAgentInteractionErrorMessage(error)
+      })
     }
   }
-}));
+}))

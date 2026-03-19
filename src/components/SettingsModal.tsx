@@ -1,246 +1,225 @@
-import { useState } from 'react';
-import { X, Plus, Trash2, ChevronDown, RotateCcw } from 'lucide-react';
-import { useStore, type AgentProfile } from '../store/useStore';
-import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from '../config/modeMetadata';
-
-// スタンスのプリセット一覧
-const STANCE_PRESETS = [
-  { label: '建設的', description: '前向きな提案を中心に' },
-  { label: '批判的', description: 'リスクや問題を指摘' },
-  { label: '中立', description: '客観的に分析' },
-  { label: 'アイデア出し', description: '創造的な発想' },
-  { label: 'リスク分析', description: '潜在的な問題を洗い出し' },
-  { label: '受容的', description: '他者の意見を受け入れる' },
-  { label: '同調的', description: '合意形成を重視' },
-  { label: '挑戦的', description: '現状打破を提案' },
-  { label: 'データ重視', description: '数値やエビデンスに基づく' },
-  { label: '実践派', description: '実行可能性を重視' },
-  { label: 'ユーザー目線', description: 'エンドユーザーの視点' },
-  { label: '長期視点', description: '将来を見据えた意見' },
-];
-
-// 性格のプリセット一覧
-const PERSONALITY_PRESETS = [
-  { label: '論理的', description: '筋道立てて話す' },
-  { label: '感情的', description: '情熱や共感で語る' },
-  { label: '協調的', description: '周囲と合わせる' },
-  { label: '前向き', description: 'ポジティブな姿勢' },
-  { label: '慎重', description: '石橋を叩いて渡る' },
-  { label: '大胆', description: '思い切った主張' },
-  { label: '冷静', description: '落ち着いた判断' },
-  { label: '熱血', description: '強い意志で主張' },
-  { label: '分析的', description: '詳細を掘り下げる' },
-  { label: '直感的', description: '第六感を信じる' },
-  { label: '寡黙', description: '少ない言葉で核心を突く' },
-  { label: '饒舌', description: '豊富な例えで説明' },
-  { label: '皮肉屋', description: '鋭い指摘とユーモア' },
-  { label: '俯瞰的', description: '全体像を見る' },
-];
-
-interface PresetPanelProps {
-  title: string;
-  presets: { label: string; description: string }[];
-  selectedValues: string[];
-  onToggle: (label: string) => void;
-  onClose: () => void;
-  customValue: string;
-  onCustomChange: (value: string) => void;
-  onCustomCommit: () => void;
-  accentColor: 'cyan' | 'amber';
-}
-
-function PresetPanel({ title, presets, selectedValues, onToggle, onClose, customValue, onCustomChange, onCustomCommit, accentColor }: PresetPanelProps) {
-  const colorClasses = accentColor === 'amber' 
-    ? { selected: 'bg-amber-500/20 border-amber-500/50 text-amber-300', hover: 'hover:border-amber-500/30' }
-    : { selected: 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300', hover: 'hover:border-cyan-500/30' };
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs text-slate-400 font-medium">{title}（複数選択可）</p>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label={`${title}パネルを閉じる`}
-          className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-900/60 text-slate-400 transition-colors hover:border-slate-500 hover:text-slate-200"
-        >
-          <X size={14} />
-        </button>
-      </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-        {presets.map(preset => {
-          const isSelected = selectedValues.includes(preset.label);
-          return (
-            <button
-              key={preset.label}
-              onClick={() => onToggle(preset.label)}
-              title={preset.description}
-              className={`flex h-11 w-full items-center justify-center rounded-lg border px-3 text-center text-sm font-semibold leading-tight transition-all ${
-                isSelected
-                  ? colorClasses.selected
-                  : `bg-slate-900/50 border-slate-700 text-slate-400 ${colorClasses.hover}`
-              }`}
-            >
-              <span className="px-1">{preset.label}</span>
-            </button>
-          );
-        })}
-      </div>
-      <div className="flex items-center gap-2">
-        <input
-          type="text"
-          value={customValue}
-          onChange={(e) => onCustomChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              onCustomCommit();
-            }
-          }}
-          placeholder="追加ニュアンス（任意）例: 少し皮肉を交えて"
-          className="flex-1 bg-slate-800/50 border border-slate-600/50 rounded-lg px-4 py-3 text-sm text-slate-200 focus:border-cyan-500 outline-none placeholder:text-sm placeholder:text-slate-500"
-        />
-        <button
-          type="button"
-          onClick={onCustomCommit}
-          disabled={!customValue.trim()}
-          className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-3 text-sm font-semibold text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/50 disabled:text-slate-500"
-        >
-          追加
-        </button>
-      </div>
-    </div>
-  );
-}
+import { LoaderCircle, Plus, RefreshCcw, RotateCcw, Trash2, X } from 'lucide-react'
+import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from '../config/modeMetadata'
+import {
+  PERSONALITY_PRESETS,
+  PROVIDER_LABELS,
+  REASONING_OPTIONS,
+  ROLE_LABELS,
+  STANCE_PRESETS,
+  parseSelectableValue,
+  serializeSelectableValue,
+  toggleSelectableValue
+} from '../config/agentMetadata'
+import { useStore, type AgentProfile, type ProviderCatalog, type ReasoningEffort } from '../store/useStore'
 
 interface SettingsModalProps {
-  isOpen: boolean;
-  onClose: () => void;
+  isOpen: boolean
+  onClose: () => void
+}
+
+function formatRateLimit(remaining: number | null | undefined, limit: number | null | undefined): string {
+  if (remaining == null && limit == null) {
+    return '--'
+  }
+
+  return `${remaining ?? '?'} / ${limit ?? '?'}`
+}
+
+function createNewAgent(index: number): AgentProfile {
+  return {
+    id: `agent-${Date.now()}`,
+    name: `新規エージェント ${index}`,
+    role: 'Participant',
+    stance: '新規性重視 / 中立・バランス',
+    personality: '丁寧・堅実',
+    provider: 'codex',
+    model: 'gpt-5.4',
+    reasoningEffort: 'medium',
+    runtimeSessionId: null,
+    rateLimits: null,
+    status: 'idle',
+    handRaiseIntensity: 0,
+    speakCount: 0
+  }
+}
+
+function getReasoningOptions(agent: AgentProfile, catalog: ProviderCatalog | undefined) {
+  const modelInfo = catalog?.models.find((model) => model.id === agent.model)
+  const supported = modelInfo?.supportedReasoningEfforts ?? []
+
+  if (supported.length === 0) {
+    return REASONING_OPTIONS
+  }
+
+  return REASONING_OPTIONS.filter((option) => supported.includes(option.value))
+}
+
+function getNextReasoningEffort(
+  nextModelId: string,
+  currentEffort: ReasoningEffort,
+  catalog: ProviderCatalog | undefined
+): ReasoningEffort {
+  const modelInfo = catalog?.models.find((model) => model.id === nextModelId)
+  const supported = modelInfo?.supportedReasoningEfforts ?? []
+
+  if (supported.length === 0) {
+    return currentEffort
+  }
+
+  if (supported.includes(currentEffort)) {
+    return currentEffort
+  }
+
+  return modelInfo?.defaultReasoningEffort ?? supported[0] ?? 'medium'
+}
+
+function getProviderInitialModel(catalog: ProviderCatalog | undefined, fallback: string): string {
+  return catalog?.models[0]?.id ?? fallback
+}
+
+interface SelectionPanelProps {
+  label: string
+  value: string
+  presets: string[]
+  onChange: (value: string) => void
+}
+
+function SelectionPanel({ label, value, presets, onChange }: SelectionPanelProps) {
+  const selectedItems = parseSelectableValue(value)
+
+  return (
+    <div className="rounded-xl border border-slate-700/70 bg-slate-900/45 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <label className="text-sm font-medium text-slate-300">{label}</label>
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-400 transition-colors hover:border-slate-500 hover:text-white"
+        >
+          クリア
+        </button>
+      </div>
+
+      <div className="mt-3 min-h-[52px] rounded-lg border border-slate-700/60 bg-slate-950/40 px-3 py-2">
+        {selectedItems.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {selectedItems.map((item) => (
+              <span
+                key={item}
+                className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-xs text-cyan-200"
+              >
+                {item}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs leading-6 text-slate-500">複数選択できます。</p>
+        )}
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {presets.map((preset) => {
+          const isSelected = selectedItems.includes(preset)
+
+          return (
+            <button
+              key={preset}
+              type="button"
+              onClick={() => onChange(toggleSelectableValue(value, preset))}
+              className={`rounded-full border px-3 py-1.5 text-xs transition-all ${
+                isSelected
+                  ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200'
+                  : 'border-slate-700 bg-slate-800/80 text-slate-300 hover:border-slate-500 hover:text-white'
+              }`}
+            >
+              {preset}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const { agents, addAgent, updateAgent, removeAgent, resetAgentsToDefault, resetAgentToDefault, turnLimit, setTurnLimit, handRaiseMode, setHandRaiseMode, environment, executionMode, setExecutionMode, discussionStyle, setDiscussionStyle } = useStore();
-  const isConversationMode = discussionStyle === 'conversation';
-  const executionModeInfo = EXECUTION_MODE_METADATA[executionMode];
-  const discussionStyleInfo = DISCUSSION_STYLE_METADATA[discussionStyle];
-  const [customInputs, setCustomInputs] = useState<Record<string, string>>({});
-  
-  // プリセットパネルの開閉状態（agentId => 'stance' | 'personality' | null）
-  const [openPanel, setOpenPanel] = useState<{ agentId: string; type: 'stance' | 'personality' } | null>(null);
+  const {
+    agents,
+    addAgent,
+    updateAgent,
+    removeAgent,
+    resetAgentsToDefault,
+    resetAgentToDefault,
+    turnLimit,
+    setTurnLimit,
+    handRaiseMode,
+    setHandRaiseMode,
+    environment,
+    executionMode,
+    setExecutionMode,
+    discussionStyle,
+    setDiscussionStyle,
+    providerCatalogs,
+    providerCatalogStatus,
+    providerCatalogError,
+    refreshProviderCatalogs
+  } = useStore()
 
-  const getCustomInputKey = (agentId: string, field: 'stance' | 'personality') => `${agentId}:${field}`;
+  if (!isOpen) {
+    return null
+  }
 
-  const setCustomInputValue = (agentId: string, field: 'stance' | 'personality', value: string) => {
-    const key = getCustomInputKey(agentId, field);
-    setCustomInputs((current) => ({ ...current, [key]: value }));
-  };
-
-  const clearCustomInputValue = (agentId: string, field: 'stance' | 'personality') => {
-    const key = getCustomInputKey(agentId, field);
-    setCustomInputs((current) => ({ ...current, [key]: '' }));
-  };
-
-  const getCustomInputValue = (agentId: string, field: 'stance' | 'personality') => {
-    return customInputs[getCustomInputKey(agentId, field)] ?? '';
-  };
-
-  const parseAttributeParts = (value: string): string[] => {
-    return value
-      .split('・')
-      .map((part) => part.trim())
-      .filter((part) => part && part !== '未設定');
-  };
-
-  const mergeAttributeValue = (currentValue: string, nextValue: string): string => {
-    const trimmedValue = nextValue.trim();
-    if (!trimmedValue) {
-      return currentValue;
-    }
-
-    const currentParts = parseAttributeParts(currentValue);
-    if (currentParts.includes(trimmedValue)) {
-      return currentParts.join('・') || '未設定';
-    }
-
-    return [...currentParts, trimmedValue].join('・');
-  };
-
-  const handleAddAgent = () => {
-    if (isConversationMode) return;
-
-    const newAgent: AgentProfile = {
-      id: `agent-${Date.now()}`,
-      name: `New Agent ${agents.length + 1}`,
-      role: 'Participant',
-      stance: 'バランス重視',
-      personality: 'フラット',
-      model: 'gpt-5.4',
-      runtimeSessionId: null,
-      status: 'idle',
-      handRaiseIntensity: 0,
-      speakCount: 0
-    };
-    addAgent(newAgent);
-  };
-
-  const handleDiscussionStyleChange = (style: 'conversation' | 'meeting') => {
-    setOpenPanel(null);
-    setDiscussionStyle(style);
-  };
-
-  // プリセットのトグル処理
-  const handlePresetToggle = (agentId: string, field: 'stance' | 'personality', label: string) => {
-    const agent = agents.find(a => a.id === agentId);
-    if (!agent) return;
-    
-    const currentValue = agent[field];
-    const currentParts = parseAttributeParts(currentValue);
-    
-    if (currentParts.includes(label)) {
-      // 既に選択済み → 削除
-      const newParts = currentParts.filter(p => p !== label);
-      updateAgent(agentId, { [field]: newParts.join('・') || '未設定' });
-    } else {
-      // 新規追加
-      const newParts = [...currentParts.filter(p => p !== '未設定'), label];
-      updateAgent(agentId, { [field]: newParts.join('・') });
-    }
-  };
-
-  const handleCustomValueCommit = (agentId: string, field: 'stance' | 'personality') => {
-    const agent = agents.find((entry) => entry.id === agentId);
-    const draftValue = getCustomInputValue(agentId, field);
-    if (!agent || !draftValue.trim()) return;
-
-    updateAgent(agentId, { [field]: mergeAttributeValue(agent[field], draftValue) });
-    clearCustomInputValue(agentId, field);
-  };
-
-  // 現在のフィールド値から選択中のプリセットを抽出
-  const getSelectedPresets = (value: string): string[] => {
-    return parseAttributeParts(value);
-  };
-
-  if (!isOpen) return null;
+  const isConversationMode = discussionStyle === 'conversation'
+  const executionModeInfo = EXECUTION_MODE_METADATA[executionMode]
+  const discussionStyleInfo = DISCUSSION_STYLE_METADATA[discussionStyle]
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
-      <div className="bg-slate-800 border border-slate-700/50 w-full max-w-3xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
-        
-        {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-slate-700/50">
-          <h2 className="text-xl font-bold text-slate-100">設定・エージェント管理</h2>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors">
-            <X size={20} />
-          </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-slate-700/60 bg-slate-800 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-700/60 px-6 py-5">
+          <div>
+            <h2 className="text-xl font-bold text-slate-100">エージェント設定</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              起動時に各 CLI からモデル候補を取得し、ここへ反映します。
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void refreshProviderCatalogs(true)}
+              className="flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-300 transition-colors hover:border-slate-500 hover:bg-slate-700/40 hover:text-white"
+            >
+              {providerCatalogStatus === 'loading' ? (
+                <LoaderCircle size={16} className="animate-spin" />
+              ) : (
+                <RefreshCcw size={16} />
+              )}
+              モデル候補を再取得
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
+            >
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-8">
-          
-          {/* 会議環境設定 */}
+        <div className="flex-1 space-y-8 overflow-y-auto px-6 py-6">
           <section className="space-y-4">
-            <h3 className="text-sm font-semibold text-cyan-400 uppercase tracking-wider">Session Settings</h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">セッション設定</h3>
+              <div className="rounded-full border border-slate-700/60 bg-slate-900/40 px-3 py-1 text-xs text-slate-400">
+                CLI モデル同期: {providerCatalogStatus === 'loading' ? '更新中' : providerCatalogStatus === 'ready' ? '同期済み' : '待機中'}
+              </div>
+            </div>
+
+            {providerCatalogError && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                モデル候補の取得に失敗したため、一部はフォールバック表示です: {providerCatalogError}
+              </div>
+            )}
+
             <div className="space-y-2">
               <label className="text-sm text-slate-400">実行モード</label>
               <div className="grid grid-cols-2 gap-3">
@@ -248,24 +227,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   onClick={() => setExecutionMode('orchestration')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
                     executionMode === 'orchestration'
-                      ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                      : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
+                      ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-300'
+                      : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
                   }`}
                 >
                   <p className="font-semibold">{EXECUTION_MODE_METADATA.orchestration.label}</p>
-                  <p className="mt-1 text-xs opacity-75">{EXECUTION_MODE_METADATA.orchestration.shortDescription}</p>
+                  <p className="mt-1 text-xs opacity-80">{EXECUTION_MODE_METADATA.orchestration.shortDescription}</p>
                 </button>
+
                 <button
                   type="button"
                   disabled
-                  aria-disabled="true"
                   className="cursor-not-allowed rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3 text-left text-slate-500 opacity-60"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold">{EXECUTION_MODE_METADATA.autonomous.label}</p>
-                    <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] tracking-wider text-slate-500">{EXECUTION_MODE_METADATA.autonomous.badge}</span>
+                    <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] tracking-wider text-slate-500">
+                      {EXECUTION_MODE_METADATA.autonomous.badge}
+                    </span>
                   </div>
-                  <p className="mt-1 text-xs opacity-75">{EXECUTION_MODE_METADATA.autonomous.shortDescription}</p>
+                  <p className="mt-1 text-xs opacity-80">{EXECUTION_MODE_METADATA.autonomous.shortDescription}</p>
                 </button>
               </div>
               <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-slate-300">
@@ -274,113 +255,118 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm text-slate-400">ディスカッションスタイル</label>
+              <label className="text-sm text-slate-400">議論スタイル</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
-                  onClick={() => handleDiscussionStyleChange('conversation')}
+                  onClick={() => setDiscussionStyle('conversation')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
-                    isConversationMode
-                      ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
-                      : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
+                    discussionStyle === 'conversation'
+                      ? 'border-cyan-500/50 bg-cyan-500/20 text-cyan-300'
+                      : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
                   }`}
                 >
                   <p className="font-semibold">{DISCUSSION_STYLE_METADATA.conversation.label}</p>
-                  <p className="mt-1 text-xs opacity-75">{DISCUSSION_STYLE_METADATA.conversation.shortDescription}</p>
+                  <p className="mt-1 text-xs opacity-80">{DISCUSSION_STYLE_METADATA.conversation.shortDescription}</p>
                 </button>
+
                 <button
-                  onClick={() => handleDiscussionStyleChange('meeting')}
+                  onClick={() => setDiscussionStyle('meeting')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
                     discussionStyle === 'meeting'
-                      ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                      : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
+                      ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
+                      : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
                   }`}
                 >
                   <p className="font-semibold">{DISCUSSION_STYLE_METADATA.meeting.label}</p>
-                  <p className="mt-1 text-xs opacity-75">{DISCUSSION_STYLE_METADATA.meeting.shortDescription}</p>
+                  <p className="mt-1 text-xs opacity-80">{DISCUSSION_STYLE_METADATA.meeting.shortDescription}</p>
                 </button>
               </div>
-              <div className={`rounded-xl border px-4 py-3 text-sm ${
-                isConversationMode
-                  ? 'border-cyan-500/20 bg-cyan-500/10 text-slate-300'
-                  : 'border-amber-500/20 bg-amber-500/10 text-slate-300'
-              }`}>
+              <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 px-4 py-3 text-sm text-slate-300">
                 {discussionStyleInfo.longDescription}
               </div>
             </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <label className="text-sm text-slate-400">実行環境</label>
-                <select 
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-cyan-500"
-                  defaultValue={environment}
+                <select
+                  value={environment}
+                  disabled
+                  className="w-full cursor-not-allowed rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-slate-400 opacity-70"
                 >
-                  <option value="sandbox">Sandbox (安全推奨)</option>
-                  <option value="full">Full Access (権限あり)</option>
+                  <option value="sandbox">Sandbox</option>
+                  <option value="full">Full Access</option>
                 </select>
               </div>
+
               <div className="space-y-2">
-                <label className="text-sm text-slate-400">ターン数（各エージェントの平均発言回数）</label>
-                <input 
-                  type="number" 
+                <label className="text-sm text-slate-400">ターン数</label>
+                <input
+                  type="number"
                   min={1}
                   max={10}
                   value={turnLimit}
-                  onChange={(e) => setTurnLimit(Number(e.target.value) || 1)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-cyan-500"
+                  onChange={(event) => setTurnLimit(Number(event.target.value) || 1)}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-slate-200 outline-none focus:border-cyan-500"
                 />
               </div>
             </div>
-            
-            {isConversationMode ? null : (
+
+            {!isConversationMode && (
               <div className="space-y-2">
-                <label className="text-sm text-slate-400">挙手判定方式（発言者の決定方法）</label>
-                <div className="flex gap-3">
+                <label className="text-sm text-slate-400">挙手機構</label>
+                <div className="grid grid-cols-2 gap-3">
                   <button
                     onClick={() => setHandRaiseMode('rule-based')}
-                    className={`flex-1 px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
+                    className={`rounded-xl border px-4 py-3 text-left transition-all ${
                       handRaiseMode === 'rule-based'
-                        ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
-                        : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
+                        ? 'border-cyan-500/50 bg-cyan-500/20 text-cyan-300'
+                        : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
                     }`}
                   >
-                    <p className="font-semibold">📐 ルールベース</p>
-                    <p className="text-[10px] mt-1 opacity-70">高速・発言バランスと文脈で判定</p>
+                    <p className="font-semibold">Rule-based</p>
+                    <p className="mt-1 text-xs opacity-80">ルールベースで発話順を制御します。</p>
                   </button>
+
                   <button
                     onClick={() => setHandRaiseMode('ai-evaluation')}
-                    className={`flex-1 px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
+                    className={`rounded-xl border px-4 py-3 text-left transition-all ${
                       handRaiseMode === 'ai-evaluation'
-                        ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                        : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-600'
+                        ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
+                        : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
                     }`}
                   >
-                    <p className="font-semibold">🧠 AI評価</p>
-                    <p className="text-[10px] mt-1 opacity-70">自然だが時間がかかる</p>
+                    <p className="font-semibold">AI Evaluation</p>
+                    <p className="mt-1 text-xs opacity-80">AI が発話優先度を評価します。</p>
                   </button>
                 </div>
               </div>
             )}
           </section>
 
-          {/* エージェント管理 */}
           <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-cyan-400 uppercase tracking-wider">Agents Config ({isConversationMode ? '2名固定' : `${agents.length}名`})</h3>
+            <div className="flex items-center justify-between gap-4">
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">
+                エージェント設定 ({isConversationMode ? '2名固定' : `${agents.length}名`})
+              </h3>
+
               <div className="flex items-center gap-2">
-                <button 
+                <button
                   onClick={resetAgentsToDefault}
-                  title="現在のモードの推奨構成に戻す"
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700/50 text-slate-400 hover:bg-amber-500/20 hover:text-amber-400 rounded-lg text-sm font-medium transition-colors"
+                  className="flex items-center gap-1.5 rounded-lg bg-slate-700/50 px-3 py-1.5 text-sm font-medium text-slate-300 transition-colors hover:bg-amber-500/20 hover:text-amber-300"
                 >
-                  <RotateCcw size={14} /> リセット
+                  <RotateCcw size={14} />
+                  全体を初期化
                 </button>
+
                 {!isConversationMode && (
-                  <button 
-                    onClick={handleAddAgent}
+                  <button
+                    onClick={() => addAgent(createNewAgent(agents.length + 1))}
                     disabled={agents.length >= 6}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                    className="flex items-center gap-1.5 rounded-lg bg-cyan-500/20 px-3 py-1.5 text-sm font-medium text-cyan-300 transition-colors hover:bg-cyan-500/30 disabled:opacity-50"
                   >
-                    <Plus size={16} /> 追加
+                    <Plus size={16} />
+                    追加
                   </button>
                 )}
               </div>
@@ -388,134 +374,197 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
             <div className="space-y-4">
               {agents.map((agent) => {
-                const isFacilitator = agent.role === 'Facilitator';
-                const isStanceOpen = openPanel?.agentId === agent.id && openPanel.type === 'stance';
-                const isPersonalityOpen = openPanel?.agentId === agent.id && openPanel.type === 'personality';
-                
+                const isFacilitator = agent.role === 'Facilitator'
+                const providerCatalog = providerCatalogs[agent.provider]
+                const modelOptions = providerCatalog?.models ?? []
+                const hasCurrentModel = modelOptions.some((model) => model.id === agent.model)
+                const reasoningOptions = getReasoningOptions(agent, providerCatalog)
+
                 return (
-                  <div key={agent.id} className={`p-4 rounded-xl border relative group ${
-                    isFacilitator 
-                      ? 'bg-amber-900/10 border-amber-700/30' 
-                      : 'bg-slate-900/50 border-slate-700'
-                  }`}>
-                    <div className="absolute top-4 right-4 flex items-center gap-1">
-                      <button 
-                        onClick={() => resetAgentToDefault(agent.id)}
-                        title="このエージェントの設定を初期値に戻す"
-                        className="text-slate-500 hover:text-amber-400 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
-                      >
-                        <RotateCcw size={14} />
-                      </button>
-                      {!isConversationMode && agents.length > 2 && (
-                        <button 
-                          onClick={() => removeAgent(agent.id)}
-                          className="text-slate-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      )}
-                    </div>
-                    
-                    <div className="grid grid-cols-2 gap-4 mr-8">
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-medium text-slate-400">エージェント名</label>
-                        <input 
-                          type="text" 
-                          value={agent.name}
-                          onChange={(e) => updateAgent(agent.id, { name: e.target.value })}
-                          className="w-full bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base font-medium text-slate-100 focus:border-cyan-500 outline-none"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-medium text-slate-400">ロール</label>
-                        <select
-                          value={agent.role}
-                          onChange={(e) => updateAgent(agent.id, { role: e.target.value as 'Participant' | 'Facilitator' })}
-                          disabled={isConversationMode}
-                          className="w-full bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base text-slate-100 focus:border-cyan-500 outline-none disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <option value="Participant">参加者 (Participant)</option>
-                          <option value="Facilitator">ファシリテーター (司会進行)</option>
-                        </select>
-                      </div>
-                      
-                      {/* スタンス */}
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-medium text-slate-400">スタンス (意見の方向性)</label>
-                        <button
-                          onClick={() => setOpenPanel(isStanceOpen ? null : { agentId: agent.id, type: 'stance' })}
-                          className="w-full flex items-center justify-between bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base text-slate-100 hover:border-cyan-500/50 transition-colors text-left"
-                        >
-                          <span className="truncate">{agent.stance}</span>
-                          <ChevronDown size={14} className={`text-slate-500 transition-transform shrink-0 ml-1 ${isStanceOpen ? 'rotate-180' : ''}`} />
-                        </button>
+                  <div
+                    key={agent.id}
+                    className={`rounded-2xl border p-4 ${
+                      isFacilitator
+                        ? 'border-amber-500/30 bg-amber-500/10'
+                        : 'border-slate-700/70 bg-slate-900/45'
+                    }`}
+                  >
+                    <div className="mb-4 flex items-start justify-between gap-4">
+                      <div>
+                        <p className="text-base font-semibold text-slate-100">{agent.name}</p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {ROLE_LABELS[agent.role]} ・ {PROVIDER_LABELS[agent.provider]}
+                        </p>
                       </div>
 
-                      {/* 性格 */}
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-medium text-slate-400">性格 (パーソナリティ)</label>
+                      <div className="flex items-center gap-1">
                         <button
-                          onClick={() => setOpenPanel(isPersonalityOpen ? null : { agentId: agent.id, type: 'personality' })}
-                          className="w-full flex items-center justify-between bg-slate-800 border border-slate-600 rounded-md px-3 py-2.5 text-base text-slate-100 hover:border-cyan-500/50 transition-colors text-left"
+                          onClick={() => resetAgentToDefault(agent.id)}
+                          className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-800 hover:text-amber-300"
                         >
-                          <span className="truncate">{agent.personality}</span>
-                          <ChevronDown size={14} className={`text-slate-500 transition-transform shrink-0 ml-1 ${isPersonalityOpen ? 'rotate-180' : ''}`} />
+                          <RotateCcw size={14} />
                         </button>
+                        {!isConversationMode && agents.length > 2 && (
+                          <button
+                            onClick={() => removeAgent(agent.id)}
+                            className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-800 hover:text-red-400"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
                       </div>
                     </div>
 
-                    {/* スタンス プリセットパネル */}
-                    {isStanceOpen && (
-                      <div className="mt-3 pt-3 border-t border-slate-700/50">
-                        <PresetPanel
-                          title="スタンス"
+                    <div className="space-y-4">
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">エージェント名</label>
+                          <input
+                            type="text"
+                            value={agent.name}
+                            onChange={(event) => updateAgent(agent.id, { name: event.target.value })}
+                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base font-medium text-slate-100 outline-none focus:border-cyan-500"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">ロール</label>
+                          <select
+                            value={agent.role}
+                            onChange={(event) => updateAgent(agent.id, { role: event.target.value as AgentProfile['role'] })}
+                            disabled={isConversationMode}
+                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            <option value="Participant">参加者</option>
+                            <option value="Facilitator">ファシリテータ</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <SelectionPanel
+                          label="スタンス"
+                          value={agent.stance}
                           presets={STANCE_PRESETS}
-                          selectedValues={getSelectedPresets(agent.stance)}
-                          onToggle={(label) => handlePresetToggle(agent.id, 'stance', label)}
-                          onClose={() => setOpenPanel(null)}
-                          customValue={getCustomInputValue(agent.id, 'stance')}
-                          onCustomChange={(value) => setCustomInputValue(agent.id, 'stance', value)}
-                          onCustomCommit={() => handleCustomValueCommit(agent.id, 'stance')}
-                          accentColor={isFacilitator ? 'amber' : 'cyan'}
+                          onChange={(nextValue) => updateAgent(agent.id, { stance: serializeSelectableValue(parseSelectableValue(nextValue)) })}
                         />
-                      </div>
-                    )}
 
-                    {/* 性格 プリセットパネル */}
-                    {isPersonalityOpen && (
-                      <div className="mt-3 pt-3 border-t border-slate-700/50">
-                        <PresetPanel
-                          title="性格"
+                        <SelectionPanel
+                          label="性格"
+                          value={agent.personality}
                           presets={PERSONALITY_PRESETS}
-                          selectedValues={getSelectedPresets(agent.personality)}
-                          onToggle={(label) => handlePresetToggle(agent.id, 'personality', label)}
-                          onClose={() => setOpenPanel(null)}
-                          customValue={getCustomInputValue(agent.id, 'personality')}
-                          onCustomChange={(value) => setCustomInputValue(agent.id, 'personality', value)}
-                          onCustomCommit={() => handleCustomValueCommit(agent.id, 'personality')}
-                          accentColor={isFacilitator ? 'amber' : 'cyan'}
+                          onChange={(nextValue) =>
+                            updateAgent(agent.id, {
+                              personality: serializeSelectableValue(parseSelectableValue(nextValue))
+                            })
+                          }
                         />
                       </div>
-                    )}
+
+                      <div className="grid gap-4 xl:grid-cols-3">
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">CLI</label>
+                          <select
+                            value={agent.provider}
+                            onChange={(event) => {
+                              const provider = event.target.value as AgentProfile['provider']
+                              const nextCatalog = providerCatalogs[provider]
+                              const nextModel = getProviderInitialModel(nextCatalog, agent.model)
+                              const nextReasoning = getNextReasoningEffort(nextModel, agent.reasoningEffort, nextCatalog)
+
+                              updateAgent(agent.id, {
+                                provider,
+                                model: nextModel,
+                                reasoningEffort: nextReasoning
+                              })
+                            }}
+                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
+                          >
+                            {Object.entries(PROVIDER_LABELS).map(([value, label]) => (
+                              <option key={value} value={value}>
+                                {label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">Model</label>
+                          <select
+                            value={agent.model}
+                            onChange={(event) => {
+                              const nextModel = event.target.value
+                              const nextReasoning = getNextReasoningEffort(nextModel, agent.reasoningEffort, providerCatalog)
+                              updateAgent(agent.id, {
+                                model: nextModel,
+                                reasoningEffort: nextReasoning
+                              })
+                            }}
+                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
+                          >
+                            {!hasCurrentModel && (
+                              <option value={agent.model}>{agent.model} (現在値)</option>
+                            )}
+                            {modelOptions.map((model) => (
+                              <option key={model.id} value={model.id}>
+                                {model.name}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-slate-500">
+                            取得元: {providerCatalog?.source ?? 'fallback'}
+                          </p>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">Reasoning</label>
+                          <select
+                            value={agent.reasoningEffort}
+                            onChange={(event) =>
+                              updateAgent(agent.id, { reasoningEffort: event.target.value as AgentProfile['reasoningEffort'] })
+                            }
+                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
+                          >
+                            {reasoningOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label} - {option.description}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-3">
+                      <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-3 py-2 text-sm text-slate-300">
+                        <p className="text-slate-400">Daily Rate Limit</p>
+                        <p className="mt-1 font-mono text-slate-100">
+                          {formatRateLimit(agent.rateLimits?.daily?.remaining, agent.rateLimits?.daily?.limit)}
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-3 py-2 text-sm text-slate-300">
+                        <p className="text-slate-400">Weekly Rate Limit</p>
+                        <p className="mt-1 font-mono text-slate-100">
+                          {formatRateLimit(agent.rateLimits?.weekly?.remaining, agent.rateLimits?.weekly?.limit)}
+                        </p>
+                      </div>
+                    </div>
                   </div>
-                );
+                )
               })}
             </div>
           </section>
-
         </div>
-        
-        {/* Footer */}
-        <div className="p-6 border-t border-slate-700/50 flex justify-end">
-          <button 
+
+        <div className="flex justify-end border-t border-slate-700/50 px-6 py-5">
+          <button
             onClick={onClose}
-            className="px-6 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium rounded-xl transition-all shadow-lg"
+            className="rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-2.5 font-medium text-white shadow-lg transition-all hover:from-cyan-400 hover:to-blue-500"
           >
-            完了
+            閉じる
           </button>
         </div>
-
       </div>
     </div>
-  );
+  )
 }

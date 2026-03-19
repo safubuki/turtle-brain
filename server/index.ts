@@ -1,145 +1,139 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import { spawn } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import { MeetingOrchestrator, type CodexExecResult, type RunTurnRequest } from './orchestrator';
+import cors from 'cors'
+import dotenv from 'dotenv'
+import express from 'express'
+import { runCli, type AgentCliProvider, type ReasoningEffort } from './cliRunner'
+import { loadInputContext } from './contextLoader'
+import { pickFilesDialog, pickFolderDialog } from './nativeDialog'
+import { MeetingOrchestrator, type RunTurnRequest } from './orchestrator'
+import { getProviderCatalogs } from './providerCatalog'
 
-dotenv.config();
+dotenv.config()
 
-const app = express();
-const port = process.env.PORT || 3001;
+const app = express()
+const port = process.env.PORT || 3001
 
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(cors())
+app.use(express.json({ limit: '10mb' }))
 
-// ヘルスチェックエンドポイント
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', message: 'Turtle Brain Backend is running' });
-});
+  res.json({ status: 'ok', message: 'Turtle Brain Backend is running' })
+})
 
-/**
- * Codex CLIを非対話モード (exec) で実行するヘルパー関数。
- * `-o` フラグで一時ファイルにクリーンな応答のみを書き出し、それを読み取る。
- * これによりstdoutに混入するメタデータ（セッション情報、トークン数等）を回避する。
- */
-function runCodexExec(model: string, prompt: string, sessionId?: string): Promise<CodexExecResult> {
-  return new Promise((resolve, reject) => {
-    // 出力用の一時ファイルを生成
-    const tmpOutFile = path.join(os.tmpdir(), `codex-out-${Date.now()}.txt`);
+const orchestrator = new MeetingOrchestrator(runCli)
 
-    const isWindows = process.platform === 'win32';
-    const codexEntryPath = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
-    const codexCommand = isWindows ? process.execPath : 'npx';
-    const baseArgs = sessionId
-      ? ['exec', '--json', 'resume', sessionId, '-m', model, '-o', tmpOutFile, prompt]
-      : ['exec', '--json', '-m', model, '-o', tmpOutFile, prompt];
-    const args = isWindows ? [codexEntryPath, ...baseArgs] : ['codex', ...baseArgs];
+app.get('/api/providers/catalogs', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === '1'
+    const catalogs = await getProviderCatalogs(forceRefresh)
+    res.json({
+      success: true,
+      catalogs
+    })
+  } catch (error) {
+    console.error('[API] Error while loading provider catalogs:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
+  }
+})
 
-    console.log(`[Codex] Running command (prompt length: ${prompt.length}, output: ${tmpOutFile})...`);
+app.post('/api/system/pick-files', async (_req, res) => {
+  try {
+    const paths = await pickFilesDialog()
+    res.json({
+      success: true,
+      paths
+    })
+  } catch (error) {
+    console.error('[API] Error while opening file dialog:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
+  }
+})
 
-    const child = spawn(codexCommand, args, {
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+app.post('/api/system/pick-folder', async (_req, res) => {
+  try {
+    const paths = await pickFolderDialog()
+    res.json({
+      success: true,
+      paths
+    })
+  } catch (error) {
+    console.error('[API] Error while opening folder dialog:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
+  }
+})
 
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code: number | null) => {
-      if (code !== 0) {
-        console.error(`[Codex] Process exited with code ${code}`);
-        console.error(`[Codex] stderr: ${stderr}`);
-        // 一時ファイルの片付け
-        try { fs.unlinkSync(tmpOutFile); } catch {}
-        reject(new Error(`Codex exited with code ${code}. stderr: ${stderr}`));
-        return;
-      }
-
-      // -o フラグで保存されたファイルからクリーンな応答を読み取る
-      try {
-        const response = fs.readFileSync(tmpOutFile, 'utf-8').trim();
-        const sessionIdFromStdout = stdout
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((line) => {
-            try {
-              return JSON.parse(line);
-            } catch {
-              return null;
-            }
-          })
-          .find((entry) => entry?.type === 'thread.started')?.thread_id ?? null;
-        console.log(`[Codex] Response loaded from file (${response.length} chars)`);
-        
-        // 一時ファイルの片付け
-        try { fs.unlinkSync(tmpOutFile); } catch {}
-        
-        if (!response) {
-          reject(new Error('Codex returned empty response'));
-          return;
-        }
-        
-        resolve({ response, sessionId: sessionIdFromStdout ?? sessionId ?? null });
-      } catch (readErr) {
-        console.error(`[Codex] Failed to read output file:`, readErr);
-        // ファイルが無い場合は一時ファイルの片付け
-        try { fs.unlinkSync(tmpOutFile); } catch {}
-        reject(new Error(`Failed to read Codex output file: ${readErr}`));
-      }
-    });
-
-    child.on('error', (err: Error) => {
-      try { fs.unlinkSync(tmpOutFile); } catch {}
-      reject(err);
-    });
-  });
-}
-
-const orchestrator = new MeetingOrchestrator(runCodexExec);
-
-// Codex CLI呼び出しエンドポイント
 app.post('/api/agent/interact', async (req, res) => {
   try {
-    const { prompt, model = 'gpt-5.4', sessionId } = req.body;
-    console.log(`[API] Received prompt for ${model}. Executing Codex CLI...`);
-    
-    const result = await runCodexExec(model, prompt, sessionId);
+    const {
+      prompt,
+      provider = 'codex',
+      model = 'gpt-5.4',
+      reasoningEffort = 'medium',
+      sessionId,
+      inputPaths = []
+    } = req.body as {
+      prompt: string
+      provider?: AgentCliProvider
+      model?: string
+      reasoningEffort?: ReasoningEffort
+      sessionId?: string
+      inputPaths?: string[]
+    }
 
-    console.log(`[API] Response (first 100 chars): ${result.response.substring(0, 100)}`);
+    const inputContext = await loadInputContext(inputPaths)
+    const mergedPrompt = inputContext.promptBlock ? `${prompt}\n\n${inputContext.promptBlock}` : prompt
 
-    res.json({ 
-      success: true, 
+    const result = await runCli({
+      provider,
+      model,
+      reasoningEffort,
+      prompt: mergedPrompt,
+      sessionId
+    })
+
+    res.json({
+      success: true,
       response: result.response,
-      sessionId: result.sessionId
-    });
+      sessionId: result.sessionId,
+      rateLimits: result.rateLimits,
+      inputWarnings: inputContext.warnings
+    })
   } catch (error) {
-    console.error('[API] Error during agent interaction:', error);
-    res.status(500).json({ success: false, error: 'Internal Server Error', details: String(error) });
+    console.error('[API] Error during agent interaction:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
   }
-});
+})
 
 app.post('/api/orchestrator/run-turn', async (req, res) => {
   try {
-    const payload = req.body as RunTurnRequest;
-    const result = await orchestrator.runTurn(payload);
-    res.json({ success: true, ...result });
+    const payload = req.body as RunTurnRequest
+    const result = await orchestrator.runTurn(payload)
+    res.json({ success: true, ...result })
   } catch (error) {
-    console.error('[API] Error during orchestration:', error);
-    res.status(500).json({ success: false, error: 'Internal Server Error', details: String(error) });
+    console.error('[API] Error during orchestration:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
   }
-});
+})
 
 app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-});
+  console.log(`Server running at http://localhost:${port}`)
+})
