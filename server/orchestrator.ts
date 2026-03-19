@@ -160,13 +160,144 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
 
+function extractJsonLineRecords(value: string): Record<string, unknown>[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line)
+        return parsed && typeof parsed === 'object' ? [parsed as Record<string, unknown>] : []
+      } catch {
+        return []
+      }
+    })
+}
+
+function getNestedString(record: unknown, pathSegments: string[]): string | null {
+  let current: unknown = record
+
+  for (const segment of pathSegments) {
+    if (!current || typeof current !== 'object') {
+      return null
+    }
+
+    current = (current as Record<string, unknown>)[segment]
+  }
+
+  return typeof current === 'string' && current.trim().length > 0 ? current : null
+}
+
+function extractAssistantContentFromEventLog(value: string): string | null {
+  const records = extractJsonLineRecords(value)
+  if (records.length === 0) {
+    return null
+  }
+
+  const assistantMessageEvent = [...records]
+    .reverse()
+    .find((record) => getNestedString(record, ['type']) === 'assistant.message')
+
+  const assistantMessageContent = getNestedString(assistantMessageEvent, ['data', 'content'])
+  if (assistantMessageContent) {
+    return assistantMessageContent.trim()
+  }
+
+  const lastDeltaEvent = [...records]
+    .reverse()
+    .find((record) => getNestedString(record, ['type']) === 'assistant.message_delta')
+  const lastMessageId = getNestedString(lastDeltaEvent, ['data', 'messageId'])
+  if (!lastMessageId) {
+    return null
+  }
+
+  const deltaContent = records
+    .filter(
+      (record) =>
+        getNestedString(record, ['type']) === 'assistant.message_delta' &&
+        getNestedString(record, ['data', 'messageId']) === lastMessageId
+    )
+    .map((record) => getNestedString(record, ['data', 'deltaContent']) ?? '')
+    .join('')
+    .trim()
+
+  return deltaContent || null
+}
+
+function sanitizeMessageContent(value: string): string {
+  return (extractAssistantContentFromEventLog(value) ?? value).trim()
+}
+
 function summarizeResponse(response: string): string {
-  const normalized = response.replace(/\s+/g, ' ').trim()
+  const normalized = sanitizeMessageContent(response).replace(/\s+/g, ' ').trim()
   if (normalized.length <= 80) {
     return normalized
   }
 
   return `${normalized.slice(0, 80).trim()}...`
+}
+
+function buildPromptExcerpt(value: string, maxChars: number): string {
+  const normalized = sanitizeMessageContent(value).replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) {
+    return normalized
+  }
+
+  return `${normalized.slice(0, maxChars).trim()}...`
+}
+
+function getRecentDialogue(session: MeetingSession, limit = 6, excerptChars = 180): string {
+  const recentMessages = session.messages.slice(-limit)
+  if (recentMessages.length === 0) {
+    return 'まだ会話は始まっていません。'
+  }
+
+  return recentMessages
+    .map((message) => {
+      const agent = session.agents.find((entry) => entry.id === message.agentId)
+      return `- ${agent?.name ?? message.agentId}: ${buildPromptExcerpt(message.content, excerptChars)}`
+    })
+    .join('\n')
+}
+
+function getLastOtherMessage(session: MeetingSession, speaker: RuntimeAgent, excerptChars = 180): string | null {
+  const target = [...session.messages].reverse().find((message) => message.agentId !== speaker.id)
+  if (!target) {
+    return null
+  }
+
+  const agent = session.agents.find((entry) => entry.id === target.agentId)
+  return `${agent?.name ?? target.agentId}: ${buildPromptExcerpt(target.content, excerptChars)}`
+}
+
+function getInboxPrompt(session: MeetingSession, speaker: RuntimeAgent, limit = 3, excerptChars = 150): string {
+  return speaker.inbox
+    .slice(-limit)
+    .map((item) => {
+      const fromAgent = session.agents.find((entry) => entry.id === item.fromAgentId)
+      const label = fromAgent?.name ?? item.fromAgentId
+      const content = item.kind === 'facilitator-note' ? item.summary : buildPromptExcerpt(item.content, excerptChars)
+      return `- ${label}: ${content}`
+    })
+    .join('\n')
+}
+
+function getDesiredActionGuidance(desiredAction?: string): string {
+  switch (desiredAction) {
+    case 'agree':
+      return '相手の良い点を認めたうえで、具体的な補足を1つ加えてください。'
+    case 'challenge':
+      return '相手の前提や見落としを1つだけ丁寧に指摘してください。'
+    case 'question':
+      return '次に進めるための具体的な質問を1つ入れてください。'
+    case 'synthesize':
+      return '複数の意見をつなぎ、今の論点を整理してください。'
+    case 'implement':
+      return '今すぐ試せる具体案や手順を1つ提案してください。'
+    default:
+      return '直前の発言を受けて、会話が前に進む具体的な返答にしてください。'
+  }
 }
 
 function cloneAgent(agent: AgentProfileInput): RuntimeAgent {
@@ -207,7 +338,7 @@ function getRecentTranscript(session: MeetingSession, limit = 8): string {
     .slice(-limit)
     .map((message) => {
       const agent = session.agents.find((entry) => entry.id === message.agentId)
-      return `${agent?.name ?? message.agentId}: ${message.content}`
+      return `${agent?.name ?? message.agentId}: ${summarizeResponse(message.content)}`
     })
     .join(' --- ')
 }
@@ -644,12 +775,12 @@ export class MeetingOrchestrator {
     const finishedAt = Date.now()
 
     applyResultToAgent(synthesizer, result)
-    session.finalConclusion = result.response
+    session.finalConclusion = sanitizeMessageContent(result.response)
     session.status = 'finished'
     session.log.push({
       turn: session.currentTurn,
       kind: 'synthesis',
-      summary: summarizeResponse(result.response),
+      summary: summarizeResponse(session.finalConclusion),
       timestamp: Date.now()
     })
 
@@ -691,8 +822,9 @@ export class MeetingOrchestrator {
   }
 
   private buildConversationPrompt(session: MeetingSession, speaker: RuntimeAgent): string {
-    const transcript = getRecentTranscript(session, 8)
-    const inboxText = speaker.inbox.slice(-4).map((item) => item.summary).join(' / ')
+    const transcript = getRecentDialogue(session, 6, 180)
+    const lastOtherMessage = getLastOtherMessage(session, speaker, 180)
+    const inboxText = getInboxPrompt(session, speaker, 3, 140)
 
     const parts = [
       getSharedPromptContext(session),
@@ -700,15 +832,22 @@ export class MeetingOrchestrator {
       buildReasoningGuidance(speaker.reasoningEffort)
     ]
 
+    if (lastOtherMessage) {
+      parts.push(`直前に相手が述べた内容:\n${lastOtherMessage}`)
+    }
+
     if (session.messages.length > 0) {
-      parts.push(`直近の会話: ${transcript}`)
+      parts.push(`直近の会話ログ:\n${transcript}`)
     }
 
     if (inboxText) {
-      parts.push(`受信メモ: ${inboxText}`)
+      parts.push(`受信メモ:\n${inboxText}`)
     }
 
-    parts.push('会話相手に返す短めの一発言を日本語で返してください。2〜4文で十分です。')
+    parts.push('会話として自然につながる短い返答を日本語で返してください。')
+    parts.push('必ず直前の誰かの発言に反応し、賛成・懸念・補足・質問のどれかを含めてください。')
+    parts.push('一般論だけを独立して述べるのは禁止です。相手の名前や「その点」「今の話」など、会話の受けを明示してください。')
+    parts.push('2〜4文で十分です。')
     return parts.join('\n\n')
   }
 
@@ -747,7 +886,7 @@ export class MeetingOrchestrator {
   }
 
   private async moderateMeeting(session: MeetingSession, facilitator: RuntimeAgent): Promise<FacilitatorDecision> {
-    const transcript = getRecentTranscript(session, 10)
+    const transcript = getRecentDialogue(session, 8, 180)
     const participantState = session.agents
       .filter((agent) => agent.role === 'Participant')
       .map((agent) => `${agent.name}: 発言${agent.speakCount}回, stance=${agent.stance}, personality=${agent.personality}`)
@@ -758,7 +897,8 @@ export class MeetingOrchestrator {
       `あなたは会議のファシリテータ ${facilitator.name} です。`,
       buildReasoningGuidance(facilitator.reasoningEffort),
       `参加者の状態: ${participantState}`,
-      `直近の議論: ${transcript || 'まだ議論は始まっていません。'}`,
+      `直近の議論:\n${transcript}`,
+      '会話が続くように、補完関係や対立関係がある参加者を優先して選んでください。',
       '必要なら複数担当者へ同時に話題を振ってください。',
       '次の JSON のみを返してください。',
       '{"overview":"現状整理","rationale":"判断理由","nextFocus":"次に進める論点","selectedAgentId":"agent-id or null","selectedAgentIds":["agent-id"],"inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false,"parallelDispatch":true|false}'
@@ -879,8 +1019,9 @@ export class MeetingOrchestrator {
     facilitatorDecision: FacilitatorDecision | null,
     scores: ScoreDecision[]
   ): string {
-    const transcript = getRecentTranscript(session, 10)
-    const inboxText = speaker.inbox.slice(-5).map((item) => item.summary).join(' / ')
+    const transcript = getRecentDialogue(session, 8, 180)
+    const lastOtherMessage = getLastOtherMessage(session, speaker, 180)
+    const inboxText = getInboxPrompt(session, speaker, 4, 140)
 
     if (speaker.role === 'Facilitator') {
       return [
@@ -889,8 +1030,9 @@ export class MeetingOrchestrator {
         buildReasoningGuidance(speaker.reasoningEffort),
         `現在の整理: ${facilitatorDecision?.overview ?? '未整理'}`,
         `次の焦点: ${facilitatorDecision?.nextFocus ?? '論点を再整理してください'}`,
-        `直近の議論: ${transcript || 'まだ議論は始まっていません。'}`,
-        '次に進めるための短い進行発話を日本語で返してください。'
+        `直近の議論:\n${transcript}`,
+        '直前の流れを受けた短い進行発話を日本語で返してください。',
+        '誰のどの発言を受けた進行なのかが伝わるようにしてください。1〜3文で十分です。'
       ].join('\n\n')
     }
 
@@ -899,11 +1041,16 @@ export class MeetingOrchestrator {
       getSharedPromptContext(session),
       `あなたは ${speaker.name} です。立場: ${speaker.stance}。性格: ${speaker.personality}。`,
       buildReasoningGuidance(speaker.reasoningEffort),
-      `直近の議論: ${transcript || 'まだ議論は始まっていません。'}`,
+      lastOtherMessage ? `直前の他者発言:\n${lastOtherMessage}` : '',
+      `直近の議論:\n${transcript}`,
       facilitatorDecision ? `ファシリテータ整理: ${facilitatorDecision.overview}\n次の焦点: ${facilitatorDecision.nextFocus}` : '',
-      inboxText ? `受信メモ: ${inboxText}` : '',
-      scoreInfo ? `期待される行動: ${scoreInfo.desiredAction} / 理由: ${scoreInfo.reason}` : '',
-      '会議を前に進める具体的な一発言を日本語で返してください。2〜5文で十分です。'
+      inboxText ? `受信メモ:\n${inboxText}` : '',
+      scoreInfo
+        ? `期待される行動: ${scoreInfo.desiredAction} / 理由: ${scoreInfo.reason}\n補足指示: ${getDesiredActionGuidance(scoreInfo.desiredAction)}`
+        : '',
+      '会議の流れに自然につながる一発言を日本語で返してください。'
+        + ' 必ず直前の発言かファシリテータの整理に反応してください。独白は禁止です。'
+        + ' 相手の名前や「その懸念」「今の提案」などの受けを入れてください。2〜4文で十分です。'
     ].filter(Boolean).join('\n\n')
   }
 
@@ -913,11 +1060,12 @@ export class MeetingOrchestrator {
     content: string,
     kind: 'message' | 'moderation'
   ): MessageRecord {
+    const sanitizedContent = sanitizeMessageContent(content)
     const message: MessageRecord = {
       id: `msg-${Date.now()}-${randomUUID().slice(0, 6)}`,
       agentId: speaker.id,
-      content,
-      summary: summarizeResponse(content),
+      content: sanitizedContent,
+      summary: summarizeResponse(sanitizedContent),
       timestamp: Date.now()
     }
 

@@ -17,6 +17,7 @@ import { AgentRuntimeMeta } from './components/AgentRuntimeMeta'
 import { SettingsModal } from './components/SettingsModal'
 import { formatAgentRole } from './config/agentMetadata'
 import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from './config/modeMetadata'
+import { apiRequestJson } from './lib/apiClient'
 import { useStore, type AgentProfile, type Message } from './store/useStore'
 
 interface ConclusionSection {
@@ -24,8 +25,77 @@ interface ConclusionSection {
   lines: string[]
 }
 
+function extractJsonLineRecords(text: string): Array<Record<string, unknown>> {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line)
+        return parsed && typeof parsed === 'object' ? [parsed as Record<string, unknown>] : []
+      } catch {
+        return []
+      }
+    })
+}
+
+function getNestedString(record: unknown, pathSegments: string[]): string | null {
+  let current: unknown = record
+
+  for (const segment of pathSegments) {
+    if (!current || typeof current !== 'object') {
+      return null
+    }
+
+    current = (current as Record<string, unknown>)[segment]
+  }
+
+  return typeof current === 'string' && current.trim().length > 0 ? current : null
+}
+
+function extractAssistantContentFromEventLog(text: string): string | null {
+  const records = extractJsonLineRecords(text)
+  if (records.length === 0) {
+    return null
+  }
+
+  const assistantMessageEvent = [...records]
+    .reverse()
+    .find((record) => getNestedString(record, ['type']) === 'assistant.message')
+
+  const assistantMessageContent = getNestedString(assistantMessageEvent, ['data', 'content'])
+  if (assistantMessageContent) {
+    return assistantMessageContent.trim()
+  }
+
+  const lastDeltaEvent = [...records]
+    .reverse()
+    .find((record) => getNestedString(record, ['type']) === 'assistant.message_delta')
+  const lastMessageId = getNestedString(lastDeltaEvent, ['data', 'messageId'])
+  if (!lastMessageId) {
+    return null
+  }
+
+  const deltaContent = records
+    .filter(
+      (record) =>
+        getNestedString(record, ['type']) === 'assistant.message_delta' &&
+        getNestedString(record, ['data', 'messageId']) === lastMessageId
+    )
+    .map((record) => getNestedString(record, ['data', 'deltaContent']) ?? '')
+    .join('')
+    .trim()
+
+  return deltaContent || null
+}
+
+function getRenderableMessageContent(content: string): string {
+  return (extractAssistantContentFromEventLog(content) ?? content).trim()
+}
+
 function splitReadableLines(text: string): string[] {
-  const normalized = text.replace(/\r/g, '\n').trim()
+  const normalized = getRenderableMessageContent(text).replace(/\r/g, '\n').trim()
   if (!normalized) {
     return []
   }
@@ -47,7 +117,7 @@ function splitReadableLines(text: string): string[] {
 }
 
 function buildDigestFromContent(content: string): string {
-  const normalized = content.replace(/\s+/g, ' ').trim()
+  const normalized = getRenderableMessageContent(content).replace(/\s+/g, ' ').trim()
   if (normalized.length <= 120) {
     return normalized
   }
@@ -128,7 +198,7 @@ function findReferencedMessages(
     references.push({
       messageId: targetMessage.id,
       label: `${agent.name} ${localOrder}件目`,
-      summary: targetMessage.summary
+      summary: buildDigestFromContent(targetMessage.content)
     })
   }
 
@@ -214,17 +284,15 @@ function getPathName(filePath: string): string {
 }
 
 async function requestSelectedPaths(endpoint: string): Promise<string[]> {
-  const response = await fetch(`http://localhost:3001${endpoint}`, {
+  const data = await apiRequestJson<{ success?: boolean; paths?: unknown[]; details?: string; error?: string }>(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     }
   })
 
-  const data = await response.json()
-
-  if (!response.ok || !data?.success) {
-    throw new Error(data?.details || data?.error || `HTTP ${response.status}`)
+  if (!data?.success) {
+    throw new Error(data?.details || data?.error || '入力ファイル / フォルダの選択に失敗しました。')
   }
 
   return Array.isArray(data.paths) ? data.paths.filter((entry: unknown): entry is string => typeof entry === 'string') : []
@@ -351,14 +419,14 @@ function App() {
     orderedMessages.forEach((message, index) => {
       const agent = agents.find((entry) => entry.id === message.agentId)
       md += `### ${index + 1}. ${agent?.name ?? message.agentId}\n`
-      md += `${message.content}\n\n`
+      md += `${getRenderableMessageContent(message.content)}\n\n`
     })
 
     md += '## 最新サマリー\n\n'
     agents.forEach((agent) => {
       const agentMessages = orderedMessages.filter((message) => message.agentId === agent.id)
       const latest = agentMessages[agentMessages.length - 1]
-      const latestSummary = latest ? (latest.summary || buildDigestFromContent(latest.content)) : '発言なし'
+      const latestSummary = latest ? buildDigestFromContent(latest.content) : '発言なし'
       md += `### ${agent.name}\n`
       md += `${latestSummary}\n\n`
     })
@@ -431,7 +499,9 @@ function App() {
               </button>
             </div>
             <div className="max-h-[60vh] overflow-y-auto px-6 py-5">
-              <p className="whitespace-pre-wrap text-sm leading-7 text-slate-200">{summaryModal.content}</p>
+              <p className="whitespace-pre-wrap text-sm leading-7 text-slate-200">
+                {getRenderableMessageContent(summaryModal.content)}
+              </p>
             </div>
           </div>
         </div>
@@ -827,19 +897,26 @@ function App() {
                       </div>
                     </div>
 
-                    <button
-                      onClick={() => latestMessage && setSummaryModal({ agentName: agent.name, content: latestMessage.content })}
-                      disabled={!latestMessage}
-                      className="group border-b border-slate-700/40 bg-gradient-to-r from-cyan-900/20 to-blue-900/20 px-4 py-3 text-left transition-colors hover:from-cyan-900/30 hover:to-blue-900/30 disabled:cursor-default"
-                    >
-                      <div className="flex items-center justify-between">
+                    <div className="border-b border-slate-700/40 bg-gradient-to-r from-cyan-900/20 to-blue-900/20 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
                         <p className={`text-xs font-semibold uppercase tracking-wider ${tone.accentText}`}>最新サマリー</p>
-                        <Eye size={14} className="text-slate-500 transition-colors group-hover:text-cyan-300" />
+                        <button
+                          onClick={() => latestMessage && setSummaryModal({ agentName: agent.name, content: latestMessage.content })}
+                          disabled={!latestMessage}
+                          className="group rounded-lg border border-slate-700/60 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-cyan-500/60 hover:text-cyan-300 disabled:cursor-default disabled:opacity-50"
+                        >
+                          <span className="inline-flex items-center gap-1.5">
+                            <Eye size={14} className="transition-colors group-hover:text-cyan-300" />
+                            詳細
+                          </span>
+                        </button>
                       </div>
-                      <p className="mt-2 line-clamp-3 text-sm leading-6 text-slate-200">
-                        {latestMessage?.summary ?? 'まだ発言はありません。'}
-                      </p>
-                    </button>
+                      <div className="mt-3 h-56 overflow-y-auto rounded-xl border border-slate-700/50 bg-slate-950/20 p-3">
+                        <p className="whitespace-pre-wrap text-sm leading-7 text-slate-200">
+                          {latestMessage ? getRenderableMessageContent(latestMessage.content) : 'まだ発言はありません。'}
+                        </p>
+                      </div>
+                    </div>
 
                     <div className="border-b border-slate-700/40 bg-slate-900/20 px-4 py-2.5">
                       <div className="flex items-center justify-between gap-3">
@@ -870,7 +947,12 @@ function App() {
                       ) : (
                         agentMessages.map((message, index) => {
                           const globalOrder = orderedMessages.findIndex((entry) => entry.id === message.id) + 1
-                          const references = findReferencedMessages(message.content, message.id, orderedMessages, agents)
+                          const references = findReferencedMessages(
+                            getRenderableMessageContent(message.content),
+                            message.id,
+                            orderedMessages,
+                            agents
+                          )
 
                           return (
                             <article id={`message-${message.id}`} key={message.id} className={`rounded-xl border p-3 ${tone.message}`}>
@@ -884,7 +966,9 @@ function App() {
                                 </div>
                               </div>
 
-                              <p className="whitespace-pre-wrap text-sm leading-7 text-slate-200">{message.content}</p>
+                              <p className="whitespace-pre-wrap text-sm leading-7 text-slate-200">
+                                {getRenderableMessageContent(message.content)}
+                              </p>
 
                               {references.length > 0 && (
                                 <div className="mt-3 space-y-2">

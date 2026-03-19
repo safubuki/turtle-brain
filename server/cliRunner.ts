@@ -1,7 +1,8 @@
 import { spawn } from 'child_process'
 import * as fs from 'fs'
-import * as path from 'path'
 import * as os from 'os'
+import * as path from 'path'
+import { getProviderCatalogs } from './providerCatalog'
 
 export type AgentCliProvider = 'codex' | 'gemini' | 'copilot'
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
@@ -32,9 +33,29 @@ export interface CliRunOptions {
   sessionId?: string
 }
 
+interface CliLauncher {
+  command: string
+  prefixArgs: string[]
+}
+
+interface CliInvocation {
+  args: string[]
+  stdinPrompt: string | null
+}
+
+interface ModelRuntimeCapabilities {
+  supportedReasoningEfforts: ReasoningEffort[]
+  defaultReasoningEffort: ReasoningEffort | null
+}
+
+const WORKSPACE_ROOT = path.resolve(__dirname, '..')
+
+function getNpmRoot(): string {
+  return path.join(process.env.APPDATA ?? '', 'npm')
+}
+
 function getCliCommandPath(provider: AgentCliProvider): string {
-  const appData = process.env.APPDATA ?? ''
-  const npmBin = path.join(appData, 'npm')
+  const npmBin = getNpmRoot()
 
   switch (provider) {
     case 'codex':
@@ -48,27 +69,64 @@ function getCliCommandPath(provider: AgentCliProvider): string {
   }
 }
 
+function getCliScriptPath(provider: AgentCliProvider): string | null {
+  const npmRoot = getNpmRoot()
+  const packageRoot = path.join(npmRoot, 'node_modules')
+
+  switch (provider) {
+    case 'codex':
+      return path.join(packageRoot, '@openai', 'codex', 'bin', 'codex.js')
+    case 'gemini':
+      return path.join(packageRoot, '@google', 'gemini-cli', 'dist', 'index.js')
+    case 'copilot':
+      return path.join(packageRoot, '@github', 'copilot', 'npm-loader.js')
+    default:
+      return null
+  }
+}
+
+function resolveCliLauncher(provider: AgentCliProvider): CliLauncher {
+  const scriptPath = getCliScriptPath(provider)
+
+  if (process.platform === 'win32' && scriptPath && fs.existsSync(scriptPath)) {
+    const nodeArgs = provider === 'gemini' ? ['--no-warnings=DEP0040'] : []
+
+    return {
+      command: process.execPath,
+      prefixArgs: [...nodeArgs, scriptPath]
+    }
+  }
+
+  return {
+    command: getCliCommandPath(provider),
+    prefixArgs: []
+  }
+}
+
 function normalizeRateLimitWindow(value: unknown): RateLimitWindow | null {
   if (!value || typeof value !== 'object') {
     return null
   }
 
   const windowLike = value as Record<string, unknown>
-  const remaining = typeof windowLike.remaining === 'number'
-    ? windowLike.remaining
-    : typeof windowLike.remainingAmount === 'number'
-      ? windowLike.remainingAmount
-      : null
-  const limit = typeof windowLike.limit === 'number'
-    ? windowLike.limit
-    : typeof windowLike.max === 'number'
-      ? windowLike.max
-      : null
-  const resetAt = typeof windowLike.resetAt === 'string'
-    ? windowLike.resetAt
-    : typeof windowLike.resetTime === 'string'
-      ? windowLike.resetTime
-      : null
+  const remaining =
+    typeof windowLike.remaining === 'number'
+      ? windowLike.remaining
+      : typeof windowLike.remainingAmount === 'number'
+        ? windowLike.remainingAmount
+        : null
+  const limit =
+    typeof windowLike.limit === 'number'
+      ? windowLike.limit
+      : typeof windowLike.max === 'number'
+        ? windowLike.max
+        : null
+  const resetAt =
+    typeof windowLike.resetAt === 'string'
+      ? windowLike.resetAt
+      : typeof windowLike.resetTime === 'string'
+        ? windowLike.resetTime
+        : null
 
   if (remaining === null && limit === null && resetAt === null) {
     return null
@@ -85,6 +143,7 @@ function extractRateLimits(value: unknown, source: string): AgentRateLimits | nu
   const record = value as Record<string, unknown>
   const directDaily = normalizeRateLimitWindow(record.daily)
   const directWeekly = normalizeRateLimitWindow(record.weekly)
+
   if (directDaily || directWeekly) {
     return {
       daily: directDaily,
@@ -117,12 +176,42 @@ function extractJsonObjects(stdout: string): unknown[] {
     })
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : null
+}
+
+function getNestedString(value: unknown, pathSegments: string[]): string | null {
+  let current: unknown = value
+
+  for (const segment of pathSegments) {
+    if (!current || typeof current !== 'object') {
+      return null
+    }
+
+    current = (current as Record<string, unknown>)[segment]
+  }
+
+  return typeof current === 'string' && current.trim().length > 0 ? current : null
+}
+
 function parseGeminiOutput(stdout: string): CliExecResult {
   try {
     const parsed = JSON.parse(stdout) as Record<string, unknown>
+    const response =
+      typeof parsed.response === 'string'
+        ? parsed.response.trim()
+        : typeof parsed.content === 'string'
+          ? parsed.content.trim()
+          : stdout.trim()
+
     return {
-      response: typeof parsed.response === 'string' ? parsed.response.trim() : stdout.trim(),
-      sessionId: typeof parsed.session_id === 'string' ? parsed.session_id : null,
+      response,
+      sessionId:
+        typeof parsed.session_id === 'string'
+          ? parsed.session_id
+          : typeof parsed.sessionId === 'string'
+            ? parsed.sessionId
+            : null,
       rateLimits: extractRateLimits(parsed, 'gemini')
     }
   } catch {
@@ -135,49 +224,80 @@ function parseGeminiOutput(stdout: string): CliExecResult {
 }
 
 function parseCopilotOutput(stdout: string): CliExecResult {
-  const parsedObjects = extractJsonObjects(stdout)
-  const responseCandidate = [...parsedObjects]
+  const records = extractJsonObjects(stdout)
+    .map(asRecord)
+    .filter((entry): entry is Record<string, unknown> => entry !== null)
+
+  const assistantMessageEvent = [...records]
     .reverse()
-    .map((item) => {
-      if (!item || typeof item !== 'object') {
-        return null
+    .find((record) => getNestedString(record, ['type']) === 'assistant.message')
+
+  const assistantMessageContent = getNestedString(assistantMessageEvent, ['data', 'content'])
+
+  const lastDeltaEvent = [...records]
+    .reverse()
+    .find((record) => getNestedString(record, ['type']) === 'assistant.message_delta')
+  const lastDeltaMessageId = getNestedString(lastDeltaEvent, ['data', 'messageId'])
+  const deltaContent = lastDeltaMessageId
+    ? records
+        .filter(
+          (record) =>
+            getNestedString(record, ['type']) === 'assistant.message_delta' &&
+            getNestedString(record, ['data', 'messageId']) === lastDeltaMessageId
+        )
+        .map((record) => getNestedString(record, ['data', 'deltaContent']) ?? '')
+        .join('')
+        .trim()
+    : ''
+
+  const fallbackResponse = [...records]
+    .reverse()
+    .map((record) => {
+      const directKeys = ['response', 'content', 'message', 'output', 'text']
+      for (const key of directKeys) {
+        const value = record[key]
+        if (typeof value === 'string' && value.trim().length > 0) {
+          return value.trim()
+        }
       }
 
-      const record = item as Record<string, unknown>
-      const values = ['response', 'content', 'message', 'output', 'text']
-        .map((key) => record[key])
-        .find((entry) => typeof entry === 'string')
-      return typeof values === 'string' ? values : null
+      return getNestedString(record, ['data', 'content']) ?? getNestedString(record, ['data', 'message']) ?? null
     })
     .find(Boolean)
 
-  const sessionCandidate = [...parsedObjects]
+  const resultEvent = [...records]
     .reverse()
-    .map((item) => {
-      if (!item || typeof item !== 'object') {
-        return null
-      }
+    .find((record) => getNestedString(record, ['type']) === 'result')
 
-      const record = item as Record<string, unknown>
-      const values = ['session_id', 'sessionId', 'conversationId', 'id']
-        .map((key) => record[key])
-        .find((entry) => typeof entry === 'string')
-      return typeof values === 'string' ? values : null
-    })
-    .find(Boolean)
+  const sessionCandidate =
+    getNestedString(resultEvent, ['sessionId']) ??
+    getNestedString(resultEvent, ['data', 'sessionId']) ??
+    [...records]
+      .reverse()
+      .map(
+        (record) =>
+          getNestedString(record, ['session_id']) ??
+          getNestedString(record, ['sessionId']) ??
+          getNestedString(record, ['conversationId'])
+      )
+      .find(Boolean) ??
+    null
 
-  const rateLimits = parsedObjects
-    .map((entry) => extractRateLimits(entry, 'copilot'))
-    .find(Boolean) ?? null
+  const rateLimits = records.map((entry) => extractRateLimits(entry, 'copilot')).find(Boolean) ?? null
 
   return {
-    response: responseCandidate?.trim() || stdout.trim(),
+    response:
+      assistantMessageContent ??
+      (deltaContent || fallbackResponse?.trim() || stdout.trim()),
     sessionId: sessionCandidate ?? null,
     rateLimits
   }
 }
 
-function parseCodexOutput(stdout: string, fallbackSessionId?: string): { sessionId: string | null; rateLimits: AgentRateLimits | null } {
+function parseCodexOutput(
+  stdout: string,
+  fallbackSessionId?: string
+): { sessionId: string | null; rateLimits: AgentRateLimits | null } {
   const parsedObjects = extractJsonObjects(stdout)
   const threadStarted = parsedObjects.find((entry) => {
     if (!entry || typeof entry !== 'object') {
@@ -187,85 +307,213 @@ function parseCodexOutput(stdout: string, fallbackSessionId?: string): { session
     return (entry as Record<string, unknown>).type === 'thread.started'
   }) as Record<string, unknown> | undefined
 
-  const rateLimits = parsedObjects
-    .map((entry) => extractRateLimits(entry, 'codex'))
-    .find(Boolean) ?? null
+  const rateLimits =
+    parsedObjects.map((entry) => extractRateLimits(entry, 'codex')).find(Boolean) ?? null
 
   return {
-    sessionId: typeof threadStarted?.thread_id === 'string' ? threadStarted.thread_id : fallbackSessionId ?? null,
+    sessionId:
+      typeof threadStarted?.thread_id === 'string'
+        ? threadStarted.thread_id
+        : fallbackSessionId ?? null,
     rateLimits
   }
 }
 
-function buildPromptPrefix(provider: AgentCliProvider, reasoningEffort: ReasoningEffort): string {
-  const providerLabel =
-    provider === 'codex' ? 'Codex CLI' :
-    provider === 'gemini' ? 'Gemini CLI' :
-    'GitHub Copilot CLI'
-
-  return [
-    `You are running inside ${providerLabel}.`,
-    `Reasoning effort preference: ${reasoningEffort}.`,
-    'This task is a discussion task only.',
-    'Do not modify files, do not run shell commands, and do not browse the web unless strictly required to answer.',
-    'Respond in Japanese.'
-  ].join('\n')
+function getReadableDirectoryArgs(provider: AgentCliProvider): string[] {
+  switch (provider) {
+    case 'codex':
+      return ['--add-dir', WORKSPACE_ROOT]
+    case 'gemini':
+      return ['--include-directories', WORKSPACE_ROOT]
+    case 'copilot':
+      return ['--add-dir', WORKSPACE_ROOT]
+    default:
+      return []
+  }
 }
 
-function buildCommand(provider: AgentCliProvider, options: CliRunOptions, outputFilePath?: string): { command: string; args: string[] } {
-  const command = getCliCommandPath(provider)
-  const prompt = `${buildPromptPrefix(provider, options.reasoningEffort)}\n\n${options.prompt}`
+async function getModelRuntimeCapabilities(
+  provider: AgentCliProvider,
+  model: string
+): Promise<ModelRuntimeCapabilities> {
+  try {
+    const catalogs = await getProviderCatalogs(false)
+    const providerCatalog = catalogs[provider]
+    const modelInfo = providerCatalog.models.find((entry) => entry.id === model)
+
+    if (modelInfo) {
+      return {
+        supportedReasoningEfforts: modelInfo.supportedReasoningEfforts,
+        defaultReasoningEffort: modelInfo.defaultReasoningEffort
+      }
+    }
+  } catch {
+    // Fall back to conservative defaults.
+  }
+
+  return {
+    supportedReasoningEfforts: provider === 'gemini' ? [] : [],
+    defaultReasoningEffort: null
+  }
+}
+
+function buildPromptPrefix(
+  provider: AgentCliProvider,
+  reasoningEffort: ReasoningEffort,
+  supportsReasoning: boolean
+): string {
+  const providerLabel =
+    provider === 'codex' ? 'Codex CLI' : provider === 'gemini' ? 'Gemini CLI' : 'GitHub Copilot CLI'
+
+  const lines = [
+    `You are running inside ${providerLabel}.`,
+    'This task is a discussion task only.',
+    'Do not modify files.',
+    'Do not run shell commands.',
+    'Do not browse the web unless strictly required to answer.',
+    'Respond in Japanese.'
+  ]
+
+  if (supportsReasoning) {
+    lines.splice(1, 0, `Reasoning effort preference: ${reasoningEffort}.`)
+  }
+
+  return lines.join('\n')
+}
+
+function buildPromptBody(
+  provider: AgentCliProvider,
+  options: CliRunOptions,
+  supportsReasoning: boolean
+): string {
+  return `${buildPromptPrefix(provider, options.reasoningEffort, supportsReasoning)}\n\n${options.prompt}`
+}
+
+function buildProviderArgs(
+  provider: AgentCliProvider,
+  options: CliRunOptions,
+  outputFilePath: string | undefined,
+  supportsReasoning: boolean
+): CliInvocation {
+  const prompt = buildPromptBody(provider, options, supportsReasoning)
+  const readableDirectoryArgs = getReadableDirectoryArgs(provider)
 
   switch (provider) {
     case 'codex': {
-      const args = options.sessionId
-        ? ['exec', '--json', 'resume', options.sessionId, '-m', options.model, '-o', outputFilePath ?? '', prompt]
-        : ['exec', '--json', '-m', options.model, '-o', outputFilePath ?? '', prompt]
-      return { command, args }
+      const sharedArgs = ['exec', '--json', '-C', WORKSPACE_ROOT, '-s', 'read-only', ...readableDirectoryArgs]
+      const resultOutputArgs = outputFilePath ? ['-o', outputFilePath] : []
+
+      if (options.sessionId) {
+        return {
+          args: [
+            ...sharedArgs,
+            'resume',
+            '-m',
+            options.model,
+            '--skip-git-repo-check',
+            ...resultOutputArgs,
+            options.sessionId,
+            '-'
+          ],
+          stdinPrompt: prompt
+        }
+      }
+
+      return {
+        args: [
+          ...sharedArgs,
+          '-m',
+          options.model,
+          '--skip-git-repo-check',
+          ...resultOutputArgs,
+          '-'
+        ],
+        stdinPrompt: prompt
+      }
     }
+
     case 'gemini': {
-      const args = ['-p', prompt, '--output-format', 'json', '-m', options.model]
+      const args = [
+        '--output-format',
+        'json',
+        '--approval-mode',
+        'plan',
+        '-m',
+        options.model,
+        ...readableDirectoryArgs
+      ]
+
       if (options.sessionId) {
         args.push('--resume', options.sessionId)
       }
-      return { command, args }
+
+      return {
+        args,
+        stdinPrompt: prompt
+      }
     }
+
     case 'copilot': {
       const args = [
-        '-p',
-        prompt,
         '--output-format',
         'json',
+        '--stream',
+        'off',
         '--model',
         options.model,
-        '--reasoning-effort',
-        options.reasoningEffort,
         '--allow-all-tools',
         '--no-ask-user',
         '--no-alt-screen',
-        '--no-color'
+        '--no-color',
+        ...readableDirectoryArgs
       ]
-      if (options.sessionId) {
-        args.push(`--resume=${options.sessionId}`)
+
+      if (supportsReasoning) {
+        args.push('--reasoning-effort', options.reasoningEffort)
       }
-      return { command, args }
+
+      if (options.sessionId) {
+        args.push('--resume', options.sessionId)
+      }
+
+      return {
+        args,
+        stdinPrompt: prompt
+      }
     }
   }
 }
 
-export function runCli(options: CliRunOptions): Promise<CliExecResult> {
-  return new Promise((resolve, reject) => {
-    const tmpOutFile = options.provider === 'codex'
+export async function runCli(options: CliRunOptions): Promise<CliExecResult> {
+  const tmpOutFile =
+    options.provider === 'codex'
       ? path.join(os.tmpdir(), `turtle-brain-codex-${Date.now()}.txt`)
       : undefined
 
-    const { command, args } = buildCommand(options.provider, options, tmpOutFile)
-    const child = spawn(command, args, {
-      stdio: ['ignore', 'pipe', 'pipe']
+  const launcher = resolveCliLauncher(options.provider)
+  const capabilities = await getModelRuntimeCapabilities(options.provider, options.model)
+  const supportsReasoning = capabilities.supportedReasoningEfforts.length > 0
+  const invocation = buildProviderArgs(options.provider, options, tmpOutFile, supportsReasoning)
+  const args = [
+    ...launcher.prefixArgs,
+    ...invocation.args
+  ]
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(launcher.command, args, {
+      cwd: WORKSPACE_ROOT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true
     })
 
     let stdout = ''
     let stderr = ''
+
+    child.stdin.on('error', () => {
+      // Providers may close stdin early once they have consumed the prompt.
+    })
+
+    child.stdin.end(invocation.stdinPrompt ? `${invocation.stdinPrompt}\n` : '')
 
     child.stdout.on('data', (data: Buffer) => {
       stdout += data.toString()
@@ -280,8 +528,18 @@ export function runCli(options: CliRunOptions): Promise<CliExecResult> {
         try {
           const response = fs.readFileSync(tmpOutFile, 'utf-8').trim()
           fs.unlinkSync(tmpOutFile)
+
           if (code !== 0) {
             reject(new Error(`${options.provider} exited with code ${code}. stderr: ${stderr}`))
+            return
+          }
+
+          if (!response) {
+            reject(
+              new Error(
+                `${options.provider} completed but no final message was written. stdout: ${stdout} stderr: ${stderr}`
+              )
+            )
             return
           }
 
@@ -331,7 +589,12 @@ export function runCli(options: CliRunOptions): Promise<CliExecResult> {
           // no-op
         }
       }
-      reject(error)
+
+      reject(
+        new Error(
+          `${options.provider} launch failed: ${error.message} (command: ${launcher.command} ${args.join(' ')})`
+        )
+      )
     })
   })
 }

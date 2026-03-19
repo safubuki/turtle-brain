@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { apiRequestJson } from '../lib/apiClient'
 
 export type AgentRole = 'Participant' | 'Facilitator'
 export type HandRaiseMode = 'rule-based' | 'ai-evaluation'
@@ -449,6 +450,10 @@ function getAgentInteractionErrorMessage(error: unknown, details?: string): stri
   }
 
   if (error instanceof Error && error.message) {
+    if (/ENAMETOOLONG/i.test(error.message)) {
+      return 'エージェント処理に失敗しました: コマンド引数が長すぎます。古いバックエンドが動いたままの可能性が高いので、サーバーを再起動してください。今回の修正以降は server 側も自動再起動されます。'
+    }
+
     return `エージェント処理に失敗しました: ${error.message}`
   }
 
@@ -589,11 +594,15 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
     }))
 
     try {
-      const response = await fetch(`http://localhost:3001/api/providers/catalogs${force ? '?refresh=1' : ''}`)
-      const data = await response.json()
+      const data = await apiRequestJson<{
+        success?: boolean
+        catalogs?: ProviderCatalogMap
+        details?: string
+        error?: string
+      }>(`/api/providers/catalogs${force ? '?refresh=1' : ''}`)
 
-      if (!response.ok || !data?.success || !data?.catalogs) {
-        throw new Error(data?.details || data?.error || `HTTP ${response.status}`)
+      if (!data?.success || !data?.catalogs) {
+        throw new Error(data?.details || data?.error || 'モデル候補を取得できませんでした。')
       }
 
       const incoming = data.catalogs as ProviderCatalogMap
@@ -656,7 +665,18 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
     }
 
     try {
-      const response = await fetch('http://localhost:3001/api/orchestrator/run-turn', {
+      const data = await apiRequestJson<{
+        success?: boolean
+        sessionId: string | null
+        agents: AgentProfile[]
+        messages: Message[]
+        currentTurn: number
+        sessionStatus: TurtleBrainState['sessionStatus']
+        finalConclusion: string | null
+        debug: OrchestrationDebug | null
+        details?: string
+        error?: string
+      }>('/api/orchestrator/run-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -669,14 +689,8 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         })
       })
 
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data?.details || data?.error || `HTTP ${response.status}`)
-      }
-
       if (!data.success) {
-        throw new Error(data.details || data.error || 'Unknown orchestrator error')
+        throw new Error(data.details || data.error || 'オーケストレーションの実行に失敗しました。')
       }
 
       set({

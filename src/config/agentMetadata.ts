@@ -12,34 +12,60 @@ export const ROLE_LABELS: Record<AgentRole, string> = {
 }
 
 export const STANCE_PRESETS = [
-  '新規性重視',
-  '批判的検証',
-  '中立・バランス',
-  '進行管理',
+  '技術推進',
   '品質・リスク管理',
   'ユーザー価値重視',
   'コスト最適化',
-  '長期運用重視'
-]
+  '実装速度重視',
+  '運用安定性重視',
+  'セキュリティ重視',
+  'データ・分析重視',
+  'ビジネス成果重視',
+  '現場実装目線',
+  '中立・バランス',
+  '長期保守重視',
+  '拡張性重視',
+  '標準化・整備',
+  '革新・実験志向',
+  'シンプル化重視',
+  '顧客体験重視',
+  'チーム生産性重視',
+  '法令・監査対応',
+  'プロダクト戦略重視'
+] as const
 
 export const PERSONALITY_PRESETS = [
-  '丁寧・堅実',
-  '率直・論理的',
-  '高速・実務的',
-  '慎重・分析的',
-  '大胆・発想型',
-  'フレンドリー'
-]
+  '論理的',
+  '感情的',
+  '協調的',
+  '前向き',
+  '慎重',
+  '大胆',
+  '冷静',
+  '熱血',
+  '分析的',
+  '直感的',
+  '寡黙',
+  '饒舌',
+  '皮肉屋',
+  '情熱的',
+  '丁寧',
+  '厳格',
+  '柔軟',
+  '主体的',
+  '実務的',
+  '批判的'
+] as const
 
 export const REASONING_OPTIONS: Array<{
   value: ReasoningEffort
   label: string
   description: string
 }> = [
-  { value: 'low', label: 'Low', description: '高速に応答する軽めの推論' },
+  { value: 'low', label: 'Low', description: '軽めに推論して素早く返答' },
   { value: 'medium', label: 'Medium', description: '標準的な推論強度' },
-  { value: 'high', label: 'High', description: '複雑な議論向けに深く考える' },
-  { value: 'xhigh', label: 'XHigh', description: '最も重い推論を行う' }
+  { value: 'high', label: 'High', description: '深めに考えて回答品質を重視' },
+  { value: 'xhigh', label: 'XHigh', description: '最も強い推論で複雑な課題向け' }
 ]
 
 export function formatAgentRole(role: AgentRole): string {
@@ -54,7 +80,7 @@ export function parseSelectableValue(value: string): string[] {
   return Array.from(
     new Set(
       value
-        .split(/\s*\/\s*|\s*／\s*|[,\n、]+/)
+        .split(/\s*\/\s*|\s*・\s*|[,+、\n]+/u)
         .map((entry) => entry.trim())
         .filter(Boolean)
     )
@@ -67,6 +93,7 @@ export function serializeSelectableValue(values: string[]): string {
 
 export function toggleSelectableValue(currentValue: string, target: string): string {
   const selections = parseSelectableValue(currentValue)
+
   if (selections.includes(target)) {
     return serializeSelectableValue(selections.filter((value) => value !== target))
   }

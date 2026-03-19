@@ -17,6 +17,13 @@ interface SettingsModalProps {
   onClose: () => void
 }
 
+interface SelectionPanelProps {
+  label: string
+  value: string
+  presets: readonly string[]
+  onChange: (value: string) => void
+}
+
 function formatRateLimit(remaining: number | null | undefined, limit: number | null | undefined): string {
   if (remaining == null && limit == null) {
     return '--'
@@ -28,10 +35,10 @@ function formatRateLimit(remaining: number | null | undefined, limit: number | n
 function createNewAgent(index: number): AgentProfile {
   return {
     id: `agent-${Date.now()}`,
-    name: `新規エージェント ${index}`,
+    name: `追加エージェント${index}`,
     role: 'Participant',
-    stance: '新規性重視 / 中立・バランス',
-    personality: '丁寧・堅実',
+    stance: '中立・バランス / ユーザー価値重視',
+    personality: '論理的 / 丁寧',
     provider: 'codex',
     model: 'gpt-5.4',
     reasoningEffort: 'medium',
@@ -48,7 +55,7 @@ function getReasoningOptions(agent: AgentProfile, catalog: ProviderCatalog | und
   const supported = modelInfo?.supportedReasoningEfforts ?? []
 
   if (supported.length === 0) {
-    return REASONING_OPTIONS
+    return []
   }
 
   return REASONING_OPTIONS.filter((option) => supported.includes(option.value))
@@ -77,30 +84,39 @@ function getProviderInitialModel(catalog: ProviderCatalog | undefined, fallback:
   return catalog?.models[0]?.id ?? fallback
 }
 
-interface SelectionPanelProps {
-  label: string
-  value: string
-  presets: string[]
-  onChange: (value: string) => void
+function getCatalogStatusLabel(status: 'idle' | 'loading' | 'ready' | 'error'): string {
+  switch (status) {
+    case 'loading':
+      return '取得中'
+    case 'ready':
+      return '利用可能'
+    case 'error':
+      return 'フォールバック'
+    default:
+      return '待機中'
+  }
 }
 
 function SelectionPanel({ label, value, presets, onChange }: SelectionPanelProps) {
   const selectedItems = parseSelectableValue(value)
 
   return (
-    <div className="rounded-xl border border-slate-700/70 bg-slate-900/45 p-3">
+    <div className="rounded-2xl border border-slate-700/70 bg-slate-900/50 p-4">
       <div className="flex items-center justify-between gap-3">
-        <label className="text-sm font-medium text-slate-300">{label}</label>
+        <div>
+          <label className="text-sm font-medium text-slate-200">{label}</label>
+          <p className="mt-1 text-xs text-slate-500">複数選択可。クリックで追加・解除します。</p>
+        </div>
         <button
           type="button"
           onClick={() => onChange('')}
-          className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-400 transition-colors hover:border-slate-500 hover:text-white"
+          className="rounded-lg border border-slate-700 px-2.5 py-1 text-[11px] text-slate-400 transition-colors hover:border-slate-500 hover:text-white"
         >
           クリア
         </button>
       </div>
 
-      <div className="mt-3 min-h-[52px] rounded-lg border border-slate-700/60 bg-slate-950/40 px-3 py-2">
+      <div className="mt-3 min-h-[64px] rounded-xl border border-slate-700/60 bg-slate-950/40 px-3 py-3">
         {selectedItems.length > 0 ? (
           <div className="flex flex-wrap gap-2">
             {selectedItems.map((item) => (
@@ -113,11 +129,11 @@ function SelectionPanel({ label, value, presets, onChange }: SelectionPanelProps
             ))}
           </div>
         ) : (
-          <p className="text-xs leading-6 text-slate-500">複数選択できます。</p>
+          <p className="text-xs leading-6 text-slate-500">未選択です。</p>
         )}
       </div>
 
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         {presets.map((preset) => {
           const isSelected = selectedItems.includes(preset)
 
@@ -126,7 +142,7 @@ function SelectionPanel({ label, value, presets, onChange }: SelectionPanelProps
               key={preset}
               type="button"
               onClick={() => onChange(toggleSelectableValue(value, preset))}
-              className={`rounded-full border px-3 py-1.5 text-xs transition-all ${
+              className={`rounded-xl border px-3 py-2 text-sm transition-all ${
                 isSelected
                   ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200'
                   : 'border-slate-700 bg-slate-800/80 text-slate-300 hover:border-slate-500 hover:text-white'
@@ -177,9 +193,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-slate-700/60 bg-slate-800 shadow-2xl">
         <div className="flex items-center justify-between border-b border-slate-700/60 px-6 py-5">
           <div>
-            <h2 className="text-xl font-bold text-slate-100">エージェント設定</h2>
+            <h2 className="text-xl font-bold text-slate-100">セッション設定</h2>
             <p className="mt-1 text-sm text-slate-400">
-              起動時に各 CLI からモデル候補を取得し、ここへ反映します。
+              実行モード、議論スタイル、エージェント設定をまとめて切り替えます。
             </p>
           </div>
 
@@ -197,6 +213,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               モデル候補を再取得
             </button>
             <button
+              type="button"
               onClick={onClose}
               className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
             >
@@ -210,7 +227,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">セッション設定</h3>
               <div className="rounded-full border border-slate-700/60 bg-slate-900/40 px-3 py-1 text-xs text-slate-400">
-                CLI モデル同期: {providerCatalogStatus === 'loading' ? '更新中' : providerCatalogStatus === 'ready' ? '同期済み' : '待機中'}
+                CLI モデル取得: {getCatalogStatusLabel(providerCatalogStatus)}
               </div>
             </div>
 
@@ -224,6 +241,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <label className="text-sm text-slate-400">実行モード</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
+                  type="button"
                   onClick={() => setExecutionMode('orchestration')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
                     executionMode === 'orchestration'
@@ -258,6 +276,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <label className="text-sm text-slate-400">議論スタイル</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
+                  type="button"
                   onClick={() => setDiscussionStyle('conversation')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
                     discussionStyle === 'conversation'
@@ -270,6 +289,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => setDiscussionStyle('meeting')}
                   className={`rounded-xl border px-4 py-3 text-left transition-all ${
                     discussionStyle === 'meeting'
@@ -314,9 +334,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
             {!isConversationMode && (
               <div className="space-y-2">
-                <label className="text-sm text-slate-400">挙手機構</label>
+                <label className="text-sm text-slate-400">挙手機能</label>
                 <div className="grid grid-cols-2 gap-3">
                   <button
+                    type="button"
                     onClick={() => setHandRaiseMode('rule-based')}
                     className={`rounded-xl border px-4 py-3 text-left transition-all ${
                       handRaiseMode === 'rule-based'
@@ -325,10 +346,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     }`}
                   >
                     <p className="font-semibold">Rule-based</p>
-                    <p className="mt-1 text-xs opacity-80">ルールベースで発話順を制御します。</p>
+                    <p className="mt-1 text-xs opacity-80">ルールベースで発言順を制御します。</p>
                   </button>
 
                   <button
+                    type="button"
                     onClick={() => setHandRaiseMode('ai-evaluation')}
                     className={`rounded-xl border px-4 py-3 text-left transition-all ${
                       handRaiseMode === 'ai-evaluation'
@@ -337,7 +359,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     }`}
                   >
                     <p className="font-semibold">AI Evaluation</p>
-                    <p className="mt-1 text-xs opacity-80">AI が発話優先度を評価します。</p>
+                    <p className="mt-1 text-xs opacity-80">AI が発言の必要度を評価します。</p>
                   </button>
                 </div>
               </div>
@@ -352,6 +374,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
               <div className="flex items-center gap-2">
                 <button
+                  type="button"
                   onClick={resetAgentsToDefault}
                   className="flex items-center gap-1.5 rounded-lg bg-slate-700/50 px-3 py-1.5 text-sm font-medium text-slate-300 transition-colors hover:bg-amber-500/20 hover:text-amber-300"
                 >
@@ -361,6 +384,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
                 {!isConversationMode && (
                   <button
+                    type="button"
                     onClick={() => addAgent(createNewAgent(agents.length + 1))}
                     disabled={agents.length >= 6}
                     className="flex items-center gap-1.5 rounded-lg bg-cyan-500/20 px-3 py-1.5 text-sm font-medium text-cyan-300 transition-colors hover:bg-cyan-500/30 disabled:opacity-50"
@@ -379,6 +403,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 const modelOptions = providerCatalog?.models ?? []
                 const hasCurrentModel = modelOptions.some((model) => model.id === agent.model)
                 const reasoningOptions = getReasoningOptions(agent, providerCatalog)
+                const showReasoning = reasoningOptions.length > 0
 
                 return (
                   <div
@@ -399,6 +424,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
                       <div className="flex items-center gap-1">
                         <button
+                          type="button"
                           onClick={() => resetAgentToDefault(agent.id)}
                           className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-800 hover:text-amber-300"
                         >
@@ -406,6 +432,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         </button>
                         {!isConversationMode && agents.length > 2 && (
                           <button
+                            type="button"
                             onClick={() => removeAgent(agent.id)}
                             className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-800 hover:text-red-400"
                           >
@@ -446,7 +473,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           label="スタンス"
                           value={agent.stance}
                           presets={STANCE_PRESETS}
-                          onChange={(nextValue) => updateAgent(agent.id, { stance: serializeSelectableValue(parseSelectableValue(nextValue)) })}
+                          onChange={(nextValue) =>
+                            updateAgent(agent.id, {
+                              stance: serializeSelectableValue(parseSelectableValue(nextValue))
+                            })
+                          }
                         />
 
                         <SelectionPanel
@@ -502,36 +533,34 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             }}
                             className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
                           >
-                            {!hasCurrentModel && (
-                              <option value={agent.model}>{agent.model} (現在値)</option>
-                            )}
+                            {!hasCurrentModel && <option value={agent.model}>{agent.model} (現在値)</option>}
                             {modelOptions.map((model) => (
                               <option key={model.id} value={model.id}>
                                 {model.name}
                               </option>
                             ))}
                           </select>
-                          <p className="text-xs text-slate-500">
-                            取得元: {providerCatalog?.source ?? 'fallback'}
-                          </p>
+                          <p className="text-xs text-slate-500">取得元: {providerCatalog?.source ?? 'fallback'}</p>
                         </div>
 
-                        <div className="space-y-1.5">
-                          <label className="text-sm font-medium text-slate-400">Reasoning</label>
-                          <select
-                            value={agent.reasoningEffort}
-                            onChange={(event) =>
-                              updateAgent(agent.id, { reasoningEffort: event.target.value as AgentProfile['reasoningEffort'] })
-                            }
-                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
-                          >
-                            {reasoningOptions.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label} - {option.description}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
+                        {showReasoning && (
+                          <div className="space-y-1.5">
+                            <label className="text-sm font-medium text-slate-400">Reasoning</label>
+                            <select
+                              value={agent.reasoningEffort}
+                              onChange={(event) =>
+                                updateAgent(agent.id, { reasoningEffort: event.target.value as AgentProfile['reasoningEffort'] })
+                              }
+                              className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
+                            >
+                              {reasoningOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label} - {option.description}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -558,6 +587,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
         <div className="flex justify-end border-t border-slate-700/50 px-6 py-5">
           <button
+            type="button"
             onClick={onClose}
             className="rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-2.5 font-medium text-white shadow-lg transition-all hover:from-cyan-400 hover:to-blue-500"
           >
