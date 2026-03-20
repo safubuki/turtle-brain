@@ -1,26 +1,38 @@
 import { ChevronDown, LoaderCircle, Plus, RefreshCcw, RotateCcw, Trash2, X } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { AgentAvatar } from './AgentAvatar'
 import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from '../config/modeMetadata'
 import {
   PERSONALITY_PRESETS,
-  PERSONALITY_PRIMARY_OPTIONS,
+  PERSONALITY_VALUE_ALIASES,
   PROVIDER_LABELS,
   REASONING_OPTIONS,
   ROLE_LABELS,
   STANCE_PRESETS,
-  STANCE_PRIMARY_OPTIONS,
+  STANCE_VALUE_ALIASES,
   appendSelectableValue,
-  ensurePrimaryOption,
-  getPrimarySelectableValue,
+  normalizeSelectableValue,
   parseSelectableValue,
-  setPrimarySelectableValue,
   toggleSelectableValue
 } from '../config/agentMetadata'
+import {
+  BUILT_IN_AGENT_ICON_IDS,
+  BUILT_IN_AGENT_ICON_LABELS,
+  getAgentIconLabel,
+  getDefaultBuiltInAgentIcon
+} from '../config/iconAssets'
+import { apiRequestJson } from '../lib/apiClient'
 import { useStore, type AgentProfile, type ProviderCatalog, type ReasoningEffort } from '../store/useStore'
 
 interface SettingsModalProps {
   isOpen: boolean
   onClose: () => void
+}
+
+interface ProviderInstallSpec {
+  provider: 'codex' | 'gemini' | 'copilot'
+  label: string
+  displayCommand: string
 }
 
 interface SelectionPanelProps {
@@ -42,8 +54,11 @@ function createNewAgent(index: number): AgentProfile {
     id: `agent-${Date.now()}`,
     name: `エージェント${nextLetter}`,
     role: 'Participant',
-    stance: '中立・バランス',
+    stance: '中立・合意形成重視',
     personality: '丁寧・堅実',
+    avatarPreset: getDefaultBuiltInAgentIcon(Math.max(0, index - 1)),
+    avatarCustomDataUrl: null,
+    avatarCustomName: null,
     provider: 'codex',
     model: 'gpt-5.4',
     reasoningEffort: 'medium',
@@ -93,6 +108,22 @@ function getCatalogStatusLabel(status: 'idle' | 'loading' | 'ready' | 'error'): 
   }
 }
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result)
+        return
+      }
+
+      reject(new Error('画像データの読み込みに失敗しました。'))
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('画像データの読み込みに失敗しました。'))
+    reader.readAsDataURL(file)
+  })
+}
+
 function SelectionPanel({
   title,
   presets,
@@ -115,7 +146,7 @@ function SelectionPanel({
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-medium text-slate-200">{title}（複数選択可）</p>
-          <p className="mt-1 text-xs text-slate-500">主軸に加えるニュアンスを複数選べます。</p>
+          <p className="mt-1 text-xs text-slate-500">選択中の要素に加えるニュアンスを複数選べます。</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -204,6 +235,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     removeAgent,
     resetAgentsToDefault,
     resetAgentToDefault,
+    saveSettings,
+    clearSavedSettings,
     turnLimit,
     setTurnLimit,
     handRaiseMode,
@@ -221,6 +254,53 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   const [customInputs, setCustomInputs] = useState<Record<string, string>>({})
   const [openPanel, setOpenPanel] = useState<{ agentId: string; type: 'stance' | 'personality' } | null>(null)
+  const [installSpecs, setInstallSpecs] = useState<Record<'codex' | 'gemini' | 'copilot', ProviderInstallSpec> | null>(null)
+  const [installBusyProvider, setInstallBusyProvider] = useState<'codex' | 'gemini' | 'copilot' | null>(null)
+  const [installFeedback, setInstallFeedback] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!isOpen) {
+      return
+    }
+
+    agents.forEach((agent) => {
+      const normalizedStance = normalizeSelectableValue(agent.stance, STANCE_PRESETS, STANCE_VALUE_ALIASES)
+      const normalizedPersonality = normalizeSelectableValue(
+        agent.personality,
+        PERSONALITY_PRESETS,
+        PERSONALITY_VALUE_ALIASES
+      )
+
+      if (normalizedStance !== agent.stance || normalizedPersonality !== agent.personality) {
+        updateAgent(agent.id, {
+          stance: normalizedStance,
+          personality: normalizedPersonality
+        })
+      }
+    })
+  }, [agents, isOpen, updateAgent])
+
+  useEffect(() => {
+    if (!isOpen) {
+      return
+    }
+
+    void refreshProviderCatalogs(true)
+    void (async () => {
+      try {
+        const data = await apiRequestJson<{
+          success?: boolean
+          providers?: Record<'codex' | 'gemini' | 'copilot', ProviderInstallSpec>
+        }>('/api/providers/install-info')
+
+        if (data.success && data.providers) {
+          setInstallSpecs(data.providers)
+        }
+      } catch (error) {
+        console.error('Failed to load provider install info:', error)
+      }
+    })()
+  }, [isOpen, refreshProviderCatalogs])
 
   if (!isOpen) {
     return null
@@ -236,6 +316,77 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const clearCustomValue = (agentId: string, field: 'stance' | 'personality') => {
     setCustomInputs((current) => ({ ...current, [getCustomKey(agentId, field)]: '' }))
   }
+  const handleCustomAvatarSelected = async (agentId: string, file: File | null) => {
+    if (!file) {
+      return
+    }
+
+    const dataUrl = await readFileAsDataUrl(file)
+    updateAgent(agentId, {
+      avatarCustomDataUrl: dataUrl,
+      avatarCustomName: file.name
+    })
+  }
+  const handleInstallProvider = async (provider: 'codex' | 'gemini' | 'copilot') => {
+    const spec = installSpecs?.[provider]
+    if (!spec) {
+      return
+    }
+
+    const approved = window.confirm(
+      `${spec.label} をインストールします。\n\n実行コマンド:\n${spec.displayCommand}\n\n続行しますか？`
+    )
+    if (!approved) {
+      return
+    }
+
+    setInstallBusyProvider(provider)
+    setInstallFeedback(null)
+
+    try {
+      const data = await apiRequestJson<{
+        success?: boolean
+        command?: string
+        details?: string
+        error?: string
+      }>('/api/providers/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider })
+      })
+
+      if (!data.success) {
+        throw new Error(data.details || data.error || 'CLI のインストールに失敗しました。')
+      }
+
+      setInstallFeedback(`${spec.label} をインストールしました。`)
+      await refreshProviderCatalogs(true)
+    } catch (error) {
+      setInstallFeedback(error instanceof Error ? error.message : String(error))
+    } finally {
+      setInstallBusyProvider(null)
+    }
+  }
+
+  const handleSave = () => {
+    saveSettings()
+    onClose()
+  }
+
+  const handleClearSavedSettings = () => {
+    const approved = window.confirm(
+      '保存済みの設定を削除して、画面をデフォルト値に戻します。\n\n続行しますか？'
+    )
+
+    if (!approved) {
+      return
+    }
+
+    clearSavedSettings()
+    setOpenPanel(null)
+    setCustomInputs({})
+    setInstallFeedback('保存済み設定をクリアしました。デフォルト値を表示しています。')
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm">
@@ -243,7 +394,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         <div className="flex items-center justify-between border-b border-slate-700/60 px-6 py-5">
           <div>
             <h2 className="text-xl font-bold text-slate-100">設定・エージェント管理</h2>
-            <p className="mt-1 text-sm text-slate-400">旧 UI の主軸選択と複数選択パネルを維持した構成です。</p>
+            <p className="mt-1 text-sm text-slate-400">スタンスと性格はパネル選択を中心に調整できます。</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -266,6 +417,70 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         </div>
 
         <div className="flex-1 space-y-8 overflow-y-auto px-6 py-6">
+          <section className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">CLI 状態</h3>
+              <div className="rounded-full border border-slate-700/60 bg-slate-900/40 px-3 py-1 text-xs text-slate-400">
+                緑=導入済み / 赤=未導入
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3">
+              {(['codex', 'gemini', 'copilot'] as const).map((provider) => {
+                const catalog = providerCatalogs[provider]
+                const isAvailable = catalog?.available ?? false
+                const statusClass = isAvailable
+                  ? 'bg-emerald-400 shadow-[0_0_14px_rgba(52,211,153,0.75)]'
+                  : 'bg-rose-400 shadow-[0_0_14px_rgba(251,113,133,0.75)]'
+                const spec = installSpecs?.[provider] ?? null
+
+                return (
+                  <div key={provider} className="rounded-2xl border border-slate-700/60 bg-slate-900/35 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className={`mt-1 inline-block h-3 w-3 rounded-full ${statusClass}`} />
+                        <div>
+                          <p className="text-sm font-semibold text-slate-100">{PROVIDER_LABELS[provider]}</p>
+                          <p className="mt-1 text-xs text-slate-400">{isAvailable ? 'インストール済み' : '未インストール'}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <p className="mt-3 text-xs leading-5 text-slate-500">
+                      {catalog?.source ? `検出元: ${catalog.source}` : '検出情報なし'}
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      未導入時はボタン押下後に実行コマンドを確認してからインストールします。
+                    </p>
+                    {catalog?.error && <p className="mt-2 text-xs leading-5 text-rose-300">{catalog.error}</p>}
+
+                    {!isAvailable && spec && (
+                      <div className="mt-3 space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleInstallProvider(provider)}
+                          disabled={installBusyProvider !== null}
+                          className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {installBusyProvider === provider ? 'インストール中...' : 'インストール'}
+                        </button>
+                        <p className="rounded-lg border border-slate-700/50 bg-slate-950/40 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
+                          {spec.displayCommand}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            {installFeedback && (
+              <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-4 py-3 text-sm text-slate-300">
+                {installFeedback}
+              </div>
+            )}
+          </section>
+
           <section className="space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">セッション設定</h3>
@@ -456,10 +671,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 const isStanceOpen = openPanel?.agentId === agent.id && openPanel.type === 'stance'
                 const isPersonalityOpen = openPanel?.agentId === agent.id && openPanel.type === 'personality'
                 const accentColor = isFacilitator ? 'amber' : 'cyan'
-                const stancePrimary = getPrimarySelectableValue(agent.stance, STANCE_PRIMARY_OPTIONS)
-                const personalityPrimary = getPrimarySelectableValue(agent.personality, PERSONALITY_PRIMARY_OPTIONS)
-                const stanceDisplay = agent.stance || stancePrimary || '未設定'
-                const personalityDisplay = agent.personality || personalityPrimary || '未設定'
+                const normalizedStance = normalizeSelectableValue(agent.stance, STANCE_PRESETS, STANCE_VALUE_ALIASES)
+                const normalizedPersonality = normalizeSelectableValue(
+                  agent.personality,
+                  PERSONALITY_PRESETS,
+                  PERSONALITY_VALUE_ALIASES
+                )
+                const stanceDisplay = normalizedStance || '未設定'
+                const personalityDisplay = normalizedPersonality || '未設定'
+                const selectedAvatarLabel = getAgentIconLabel(agent.avatarPreset, agent.avatarCustomName)
+                const selectedButtonClass = isFacilitator
+                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+                  : 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200'
 
                 return (
                   <div
@@ -497,6 +720,112 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             <Trash2 size={16} />
                           </button>
                         )}
+                      </div>
+                    </div>
+
+                    <div className="mb-4 rounded-2xl border border-slate-700/50 bg-slate-900/25 p-4">
+                      <div className="flex flex-col gap-4 xl:flex-row xl:items-start">
+                        <div className="flex min-w-0 items-center gap-4">
+                          <AgentAvatar
+                            size={72}
+                            avatarPreset={agent.avatarPreset}
+                            avatarCustomDataUrl={agent.avatarCustomDataUrl}
+                            alt={`${agent.name} アイコン`}
+                            className="rounded-2xl border border-slate-700/60"
+                            fallbackClassName={
+                              isFacilitator
+                                ? 'bg-amber-500/20 text-amber-400'
+                                : 'bg-cyan-500/20 text-cyan-400'
+                            }
+                            iconClassName={isFacilitator ? 'text-amber-400' : 'text-cyan-400'}
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-slate-300">アイコン</p>
+                            <p className="mt-1 break-words text-sm text-slate-100">{selectedAvatarLabel}</p>
+                            <p className="mt-1 text-xs leading-5 text-slate-500">
+                              `未選択` は標準アイコン、`画像を選択` はその場でカスタム画像に切り替わります。
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex-1 space-y-3">
+                          <div className="grid grid-cols-[repeat(5,minmax(0,64px))] gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateAgent(agent.id, {
+                                  avatarPreset: null,
+                                  avatarCustomDataUrl: null,
+                                  avatarCustomName: null
+                                })
+                              }
+                              className={`rounded-xl border px-3 py-2 text-sm font-medium transition-all ${
+                                agent.avatarPreset === null && !agent.avatarCustomDataUrl
+                                  ? selectedButtonClass
+                                  : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-500 hover:text-white'
+                              }`}
+                            >
+                              未選択
+                            </button>
+
+                            {BUILT_IN_AGENT_ICON_IDS.map((iconId) => (
+                              <button
+                                key={iconId}
+                                title={BUILT_IN_AGENT_ICON_LABELS[iconId]}
+                                type="button"
+                                onClick={() =>
+                                  updateAgent(agent.id, {
+                                    avatarPreset: iconId,
+                                    avatarCustomDataUrl: null,
+                                    avatarCustomName: null
+                                  })
+                                }
+                                className={`flex h-16 w-16 items-center justify-center rounded-xl border p-2 transition-all ${
+                                  agent.avatarPreset === iconId && !agent.avatarCustomDataUrl
+                                    ? selectedButtonClass
+                                    : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-500 hover:text-white'
+                                }`}
+                              >
+                                <AgentAvatar
+                                  size={40}
+                                  avatarPreset={iconId}
+                                  avatarCustomDataUrl={null}
+                                  alt={BUILT_IN_AGENT_ICON_LABELS[iconId]}
+                                  className="rounded-lg border border-slate-700/60"
+                                />
+                              </button>
+                            ))}
+                          </div>
+
+                          <div className="flex flex-wrap gap-2">
+                            <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-300 transition-colors hover:border-cyan-500/50 hover:bg-slate-800 hover:text-white">
+                              画像を選択
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(event) => {
+                                  const file = event.target.files?.[0] ?? null
+                                  void handleCustomAvatarSelected(agent.id, file)
+                                  event.currentTarget.value = ''
+                                }}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              disabled={!agent.avatarCustomDataUrl}
+                              onClick={() =>
+                                updateAgent(agent.id, {
+                                  avatarCustomDataUrl: null,
+                                  avatarCustomName: null
+                                })
+                              }
+                              className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-300 transition-colors hover:border-slate-500 hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              カスタム解除
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -556,34 +885,20 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
                     {isStanceOpen && (
                       <div className="mt-4 space-y-4 rounded-2xl border border-slate-700/50 bg-slate-900/25 p-4">
-                        <div className="space-y-1.5">
-                          <label className="text-sm font-medium text-slate-400">スタンス（主軸）</label>
-                          <select
-                            value={stancePrimary}
-                            onChange={(event) => updateAgent(agent.id, { stance: setPrimarySelectableValue(agent.stance, event.target.value) })}
-                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
-                          >
-                            {ensurePrimaryOption(STANCE_PRIMARY_OPTIONS, stancePrimary).map((option) => (
-                              <option key={option} value={option}>
-                                {option}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
                         <SelectionPanel
                           title="スタンス"
                           presets={STANCE_PRESETS}
-                          selectedValues={parseSelectableValue(agent.stance)}
+                          selectedValues={parseSelectableValue(normalizedStance)}
                           customValue={customInputs[getCustomKey(agent.id, 'stance')] ?? ''}
                           accentColor={accentColor}
-                          onToggle={(value) => updateAgent(agent.id, { stance: toggleSelectableValue(agent.stance, value) })}
+                          onToggle={(value) => updateAgent(agent.id, { stance: toggleSelectableValue(normalizedStance, value) })}
                           onClear={() => updateAgent(agent.id, { stance: '' })}
                           onClose={() => setOpenPanel(null)}
                           onCustomChange={(value) => setCustomValue(agent.id, 'stance', value)}
                           onCustomCommit={() => {
                             const nextValue = customInputs[getCustomKey(agent.id, 'stance')] ?? ''
                             if (!nextValue.trim()) return
-                            updateAgent(agent.id, { stance: appendSelectableValue(agent.stance, nextValue) })
+                            updateAgent(agent.id, { stance: appendSelectableValue(normalizedStance, nextValue) })
                             clearCustomValue(agent.id, 'stance')
                           }}
                         />
@@ -592,38 +907,22 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
                     {isPersonalityOpen && (
                       <div className="mt-4 space-y-4 rounded-2xl border border-slate-700/50 bg-slate-900/25 p-4">
-                        <div className="space-y-1.5">
-                          <label className="text-sm font-medium text-slate-400">性格（主軸）</label>
-                          <select
-                            value={personalityPrimary}
-                            onChange={(event) =>
-                              updateAgent(agent.id, {
-                                personality: setPrimarySelectableValue(agent.personality, event.target.value)
-                              })
-                            }
-                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
-                          >
-                            {ensurePrimaryOption(PERSONALITY_PRIMARY_OPTIONS, personalityPrimary).map((option) => (
-                              <option key={option} value={option}>
-                                {option}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
                         <SelectionPanel
                           title="性格"
                           presets={PERSONALITY_PRESETS}
-                          selectedValues={parseSelectableValue(agent.personality)}
+                          selectedValues={parseSelectableValue(normalizedPersonality)}
                           customValue={customInputs[getCustomKey(agent.id, 'personality')] ?? ''}
                           accentColor={accentColor}
-                          onToggle={(value) => updateAgent(agent.id, { personality: toggleSelectableValue(agent.personality, value) })}
+                          onToggle={(value) =>
+                            updateAgent(agent.id, { personality: toggleSelectableValue(normalizedPersonality, value) })
+                          }
                           onClear={() => updateAgent(agent.id, { personality: '' })}
                           onClose={() => setOpenPanel(null)}
                           onCustomChange={(value) => setCustomValue(agent.id, 'personality', value)}
                           onCustomCommit={() => {
                             const nextValue = customInputs[getCustomKey(agent.id, 'personality')] ?? ''
                             if (!nextValue.trim()) return
-                            updateAgent(agent.id, { personality: appendSelectableValue(agent.personality, nextValue) })
+                            updateAgent(agent.id, { personality: appendSelectableValue(normalizedPersonality, nextValue) })
                             clearCustomValue(agent.id, 'personality')
                           }}
                         />
@@ -704,13 +1003,20 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
           </section>
         </div>
-        <div className="flex justify-end border-t border-slate-700/50 px-6 py-5">
+        <div className="flex items-center justify-between gap-3 border-t border-slate-700/50 px-6 py-5">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClearSavedSettings}
+            className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-5 py-2.5 font-medium text-rose-200 transition-colors hover:bg-rose-500/20"
+          >
+            設定をクリア
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
             className="rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-2.5 font-medium text-white shadow-lg transition-all hover:from-cyan-400 hover:to-blue-500"
           >
-            完了
+            保存
           </button>
         </div>
       </div>

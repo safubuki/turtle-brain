@@ -6,6 +6,7 @@ import { loadInputContext } from './contextLoader'
 import { pickFilesDialog, pickFolderDialog } from './nativeDialog'
 import { MeetingOrchestrator, type RunTurnRequest } from './orchestrator'
 import { getProviderCatalogs } from './providerCatalog'
+import { getProviderInstallSpec, installProviderCli } from './providerInstaller'
 
 dotenv.config()
 
@@ -41,6 +42,47 @@ app.get('/api/providers/catalogs', async (req, res) => {
     })
   } catch (error) {
     console.error('[API] Error while loading provider catalogs:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
+  }
+})
+
+app.get('/api/providers/install-info', (_req, res) => {
+  res.json({
+    success: true,
+    providers: {
+      codex: getProviderInstallSpec('codex'),
+      gemini: getProviderInstallSpec('gemini'),
+      copilot: getProviderInstallSpec('copilot')
+    }
+  })
+})
+
+app.post('/api/providers/install', async (req, res) => {
+  try {
+    const { provider } = req.body as { provider?: AgentCliProvider }
+    if (!provider || !['codex', 'gemini', 'copilot'].includes(provider)) {
+      res.status(400).json({
+        success: false,
+        error: 'Bad Request',
+        details: 'インストール対象の CLI が不正です。'
+      })
+      return
+    }
+
+    const result = await installProviderCli(provider)
+    res.json({
+      success: true,
+      provider,
+      command: result.spec.displayCommand,
+      stdout: result.stdout,
+      stderr: result.stderr
+    })
+  } catch (error) {
+    console.error('[API] Error while installing provider CLI:', error)
     res.status(500).json({
       success: false,
       error: 'Internal Server Error',
@@ -136,6 +178,24 @@ app.post('/api/orchestrator/run-turn', async (req, res) => {
     res.json({ success: true, ...result })
   } catch (error) {
     console.error('[API] Error during orchestration:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
+  }
+})
+
+app.post('/api/orchestrator/stop', async (req, res) => {
+  try {
+    const { sessionId } = req.body as { sessionId?: string }
+    const stopped = orchestrator.stopSession(sessionId)
+    res.json({
+      success: true,
+      stopped
+    })
+  } catch (error) {
+    console.error('[API] Error during orchestration stop:', error)
     res.status(500).json({
       success: false,
       error: 'Internal Server Error',

@@ -17,10 +17,10 @@ export function AgentRuntimeMeta({ agent, compact = false }: AgentRuntimeMetaPro
   return (
     <div className="min-w-0 space-y-2">
       <div className={`grid gap-2 ${topGridClass}`}>
-        <div className="flex min-h-[76px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
+        <div className="flex h-[96px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
           <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>CLI</p>
           <p
-            className={`mt-1 overflow-hidden break-words ${valueTextClass}`}
+            className={`mt-1 h-[48px] overflow-hidden break-words leading-5 ${valueTextClass}`}
             style={{
               display: '-webkit-box',
               WebkitLineClamp: 2,
@@ -32,10 +32,10 @@ export function AgentRuntimeMeta({ agent, compact = false }: AgentRuntimeMetaPro
             {PROVIDER_LABELS[agent.provider]}
           </p>
         </div>
-        <div className="flex min-h-[76px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
+        <div className="flex h-[96px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
           <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>Model</p>
           <p
-            className={`mt-1 overflow-hidden break-words ${valueTextClass}`}
+            className={`mt-1 h-[48px] overflow-hidden break-words leading-5 ${valueTextClass}`}
             style={{
               display: '-webkit-box',
               WebkitLineClamp: 2,
@@ -48,9 +48,11 @@ export function AgentRuntimeMeta({ agent, compact = false }: AgentRuntimeMetaPro
           </p>
         </div>
         {showReasoning && (
-          <div className="flex min-h-[76px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
+          <div className="flex h-[96px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
             <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>Reasoning</p>
-            <p className={`mt-1 break-words ${valueTextClass}`}>{formatReasoningEffort(agent.reasoningEffort)}</p>
+            <p className={`mt-1 h-[48px] break-words leading-5 ${valueTextClass}`}>
+              {formatReasoningEffort(agent.reasoningEffort)}
+            </p>
           </div>
         )}
       </div>

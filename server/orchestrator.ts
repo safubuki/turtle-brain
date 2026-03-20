@@ -10,6 +10,7 @@ import type {
 
 export type AgentRole = 'Participant' | 'Facilitator'
 export type DiscussionStyle = 'conversation' | 'meeting'
+export type AgentAvatarPreset = 'user_icon1' | 'user_icon2' | 'user_icon3' | 'user_icon4'
 
 export interface AgentProfileInput {
   id: string
@@ -17,6 +18,9 @@ export interface AgentProfileInput {
   role: AgentRole
   stance: string
   personality: string
+  avatarPreset: AgentAvatarPreset | null
+  avatarCustomDataUrl: string | null
+  avatarCustomName: string | null
   provider: AgentCliProvider
   model: string
   reasoningEffort: ReasoningEffort
@@ -152,6 +156,7 @@ interface MeetingSession {
   finalConclusion: string | null
   debug: OrchestratorDebugSnapshot | null
   log: OrchestratorDebugSnapshot['log']
+  stopRequested: boolean
 }
 
 type CliRunner = (options: CliRunOptions) => Promise<CliExecResult>
@@ -457,6 +462,96 @@ function getSafeSelfHistoryPrompt(
     .join('\n')
 }
 
+function getLatestAgentMessage(session: MeetingSession, agentId: string): MessageRecord | null {
+  return [...session.messages].reverse().find((message) => message.agentId === agentId) ?? null
+}
+
+function getVisibleParticipantState(session: MeetingSession, agent: RuntimeAgent, excerptChars = 120): string {
+  const latestMessage = getLatestAgentMessage(session, agent.id)
+  const latestSummary = latestMessage
+    ? buildPromptExcerpt(latestMessage.content, excerptChars)
+    : 'No visible statement yet.'
+
+  return `${agent.name}: speakCount=${agent.speakCount}, handRaise=${agent.handRaiseIntensity}, latest="${latestSummary}"`
+}
+
+function getMessagesSinceLastFacilitator(session: MeetingSession, facilitatorId: string): number {
+  let count = 0
+
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    if (session.messages[index].agentId === facilitatorId) {
+      return count
+    }
+
+    count += 1
+  }
+
+  return Number.POSITIVE_INFINITY
+}
+
+function getParticipantRecencyPenalty(session: MeetingSession, agentId: string): number {
+  const recentParticipantIds = [...session.messages]
+    .reverse()
+    .filter((message) => {
+      const speaker = session.agents.find((agent) => agent.id === message.agentId)
+      return speaker?.role === 'Participant'
+    })
+    .slice(0, 2)
+    .map((message) => message.agentId)
+
+  if (recentParticipantIds[0] === agentId) {
+    return 28
+  }
+
+  if (recentParticipantIds.includes(agentId)) {
+    return 14
+  }
+
+  return 0
+}
+
+function getSpeakCountSpread(participants: RuntimeAgent[]): number {
+  if (participants.length === 0) {
+    return 0
+  }
+
+  const counts = participants.map((agent) => agent.speakCount)
+  return Math.max(...counts) - Math.min(...counts)
+}
+
+function getQuietParticipantIds(participants: RuntimeAgent[]): string[] {
+  if (participants.length === 0) {
+    return []
+  }
+
+  const minSpeakCount = Math.min(...participants.map((agent) => agent.speakCount))
+  return participants.filter((agent) => agent.speakCount === minSpeakCount).map((agent) => agent.id)
+}
+
+function getSynthesisCapabilityScore(agent: RuntimeAgent): number {
+  const providerBonus: Record<AgentCliProvider, number> = {
+    codex: 28,
+    copilot: 24,
+    gemini: 18
+  }
+  const model = agent.model.toLowerCase()
+  let score = 50 + providerBonus[agent.provider]
+
+  if (model.includes('opus')) score += 28
+  else if (model.includes('gpt-5.4')) score += 26
+  else if (model.includes('pro')) score += 22
+  else if (model.includes('sonnet')) score += 18
+  else if (model.includes('gpt-5.3')) score += 18
+  else if (model.includes('gpt-5.2')) score += 14
+  else if (model.includes('gpt-5.1')) score += 10
+
+  if (model.includes('mini')) score -= 24
+  if (model.includes('flash')) score -= 22
+  if (model.includes('lite')) score -= 28
+
+  return score
+}
+
 function getSafeDesiredActionGuidance(desiredAction?: string): string {
   switch (desiredAction) {
     case 'agree':
@@ -511,6 +606,11 @@ export class MeetingOrchestrator {
       session.inputContextWarnings = refreshedContext.warnings
     }
 
+    if (session.stopRequested || session.status === 'finished') {
+      session.status = 'finished'
+      return this.serializeSession(session)
+    }
+
     session.status = 'running'
 
     const totalTurns = session.turnLimit * Math.max(session.agents.length, 1)
@@ -523,6 +623,11 @@ export class MeetingOrchestrator {
       await this.runConversationTurn(session)
     } else {
       await this.runMeetingTurn(session)
+    }
+
+    if (session.stopRequested) {
+      session.status = 'finished'
+      return this.serializeSession(session)
     }
 
     session.currentTurn += 1
@@ -550,7 +655,8 @@ export class MeetingOrchestrator {
       messages: [],
       finalConclusion: null,
       debug: null,
-      log: []
+      log: [],
+      stopRequested: false
     }
 
     this.sessions.set(id, session)
@@ -566,6 +672,9 @@ export class MeetingOrchestrator {
         role: agent.role,
         stance: agent.stance,
         personality: agent.personality,
+        avatarPreset: agent.avatarPreset,
+        avatarCustomDataUrl: agent.avatarCustomDataUrl,
+        avatarCustomName: agent.avatarCustomName,
         provider: agent.provider,
         model: agent.model,
         reasoningEffort: agent.reasoningEffort,
@@ -851,17 +960,9 @@ export class MeetingOrchestrator {
       return
     }
 
-    const synthesizer = session.agents.find((agent) => agent.role === 'Facilitator') ?? session.agents[0]
-    const transcript = getRecentTranscript(session, 20)
-    const prompt = [
-      getSharedPromptContext(session),
-      'これまでの議論をもとに最終結論を日本語でまとめてください。',
-      '次の4見出しをこの順番で必ず含めてください: 1. 結論サマリー 2. 共通認識 3. 残課題 4. 次のアクション',
-      '各セクションは簡潔だが具体的に書いてください。',
-      `議論ログ: ${transcript}`
-    ].join('\n\n')
-
-    void prompt
+    const synthesizer =
+      [...session.agents].sort((left, right) => getSynthesisCapabilityScore(right) - getSynthesisCapabilityScore(left))[0] ??
+      session.agents[0]
     const startedAt = Date.now()
     const result = await this.runCli({
       provider: synthesizer.provider,
@@ -981,9 +1082,22 @@ export class MeetingOrchestrator {
 
     parts.push('Reply in Japanese with one short but concrete conversational turn.')
     parts.push('React to the latest point first, then add one useful agreement, concern, question, or refinement.')
+    parts.push('Do not assume hidden roles, departments, stance labels, or personality labels of the other agent. React only to what was actually said in the dialogue.')
+    parts.push('Do not invent occupational labels such as planner, designer, engineer, or owner unless those labels were explicitly stated in the dialogue itself.')
     parts.push(`If you refer to another agent, mention the exact agent name such as "${counterpartName}".`)
     parts.push('Use 2 to 4 sentences. Do not output JSON, bullet lists, or stage directions.')
     return parts.join('\n\n')
+  }
+
+  stopSession(sessionId?: string): boolean {
+    if (!sessionId || !this.sessions.has(sessionId)) {
+      return false
+    }
+
+    const session = this.sessions.get(sessionId)!
+    session.stopRequested = true
+    session.status = 'finished'
+    return true
   }
 
   private async scoreParticipantV2(session: MeetingSession, agent: RuntimeAgent): Promise<ScoreDecision> {
@@ -1058,17 +1172,30 @@ export class MeetingOrchestrator {
 
   private async moderateMeetingV2(session: MeetingSession, facilitator: RuntimeAgent): Promise<FacilitatorDecision> {
     const transcript = getSafeRecentDialogue(session, 8, 180)
-    const participantState = session.agents
-      .filter((agent) => agent.role === 'Participant')
-      .map((agent) => `${agent.name}: speakCount=${agent.speakCount}, stance=${agent.stance}, personality=${agent.personality}`)
+    const participants = session.agents.filter((agent) => agent.role === 'Participant')
+    const participantState = participants
+      .map((agent) => getVisibleParticipantState(session, agent))
       .join(' | ')
+    const messagesSinceLastFacilitator = getMessagesSinceLastFacilitator(session, facilitator.id)
+    const quietParticipantNames = getQuietParticipantIds(participants)
+      .map((agentId) => participants.find((agent) => agent.id === agentId)?.name)
+      .filter((name): name is string => Boolean(name))
+    const speakCountSpread = getSpeakCountSpread(participants)
 
     const prompt = [
       getSafeSharedPromptContext(session),
       `You are the facilitator ${facilitator.name}.`,
       getSafeReasoningGuidance(facilitator.reasoningEffort),
+      `Messages since your last facilitation turn: ${messagesSinceLastFacilitator === Number.POSITIVE_INFINITY ? 'many / not applicable' : messagesSinceLastFacilitator}`,
+      `Speaking spread among participants: ${speakCountSpread}`,
+      quietParticipantNames.length > 0 ? `Quieter participants right now: ${quietParticipantNames.join(', ')}` : '',
       `Participant state: ${participantState}`,
       `Recent dialogue:\n${transcript}`,
+      'Prefer selecting participants to speak. Your own facilitation turn should be rare and should mainly be used for the opening, for unblocking a stalled discussion, or for synthesizing after several participant turns.',
+      'Avoid consecutive facilitator turns whenever possible.',
+      'When some participants have spoken much less than others, help rebalance the discussion by inviting the quieter participants by name.',
+      'After several participant messages, it is good to briefly summarize direction and then hand off to one or two participants.',
+      'Do not infer hidden roles, departments, stance labels, or personality labels of participants. Refer only to agent names and what they have actually said.',
       'Decide who should speak next and whether multiple participants should respond in parallel.',
       'Return JSON only.',
       '{"overview":"current state","rationale":"why","nextFocus":"next focus","selectedAgentId":"agent-id or null","selectedAgentIds":["agent-id"],"inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false,"parallelDispatch":true|false}'
@@ -1154,23 +1281,40 @@ export class MeetingOrchestrator {
     facilitator: RuntimeAgent | null
   ): { speakers: RuntimeAgent[]; dispatchReason: string } {
     const participants = session.agents.filter((agent) => agent.role === 'Participant')
+    const maxSpeakCount = Math.max(...participants.map((agent) => agent.speakCount), 0)
+    const speakCountSpread = getSpeakCountSpread(participants)
     const ranked = participants
       .map((agent) => {
         const score = scores.find((entry) => entry.agentId === agent.id)
-        const facilitatorBoost = facilitatorDecision?.selectedAgentIds.includes(agent.id) || facilitatorDecision?.selectedAgentId === agent.id ? 20 : 0
+        const facilitatorBoost =
+          facilitatorDecision?.selectedAgentIds.includes(agent.id) || facilitatorDecision?.selectedAgentId === agent.id ? 12 : 0
+        const equityBoost = Math.max(0, maxSpeakCount - agent.speakCount) * 8
+        const highHandRaiseBoost = (score?.score ?? 0) >= 80 ? 6 : 0
+        const recencyPenalty = getParticipantRecencyPenalty(session, agent.id)
         return {
           agent,
           baseScore: score?.score ?? 0,
-          adjustedScore: (score?.score ?? 0) + facilitatorBoost,
+          adjustedScore: (score?.score ?? 0) + facilitatorBoost + equityBoost + highHandRaiseBoost - recencyPenalty,
           reason: score?.reason ?? '理由なし'
         }
       })
       .sort((left, right) => right.adjustedScore - left.adjustedScore)
 
+    const topParticipantScore = ranked[0]?.adjustedScore ?? 0
+    const messagesSinceLastFacilitator =
+      facilitator ? getMessagesSinceLastFacilitator(session, facilitator.id) : Number.POSITIVE_INFINITY
+    const facilitatorShouldRebalance = speakCountSpread >= 2
+    const facilitatorShouldSummarize = messagesSinceLastFacilitator >= 3 && session.messages.length >= Math.max(participants.length, 2)
+
     if (
       facilitator &&
       facilitatorDecision?.shouldIntervene &&
-      facilitatorDecision.interventionPriority >= (ranked[0]?.adjustedScore ?? 0)
+      messagesSinceLastFacilitator >= 2 &&
+      (
+        facilitatorDecision.interventionPriority >= topParticipantScore + 12 ||
+        (facilitatorShouldRebalance && facilitatorDecision.interventionPriority >= topParticipantScore - 4) ||
+        (facilitatorShouldSummarize && facilitatorDecision.interventionPriority >= topParticipantScore)
+      )
     ) {
       return {
         speakers: [facilitator],
@@ -1250,7 +1394,10 @@ export class MeetingOrchestrator {
         selfHistory ? `Your own recent messages:\n${selfHistory}` : '',
         `Recent dialogue:\n${transcript}`,
         'Reply in Japanese with one short facilitation turn.',
+        'Base your facilitation only on the actual visible dialogue. Do not assume hidden roles, departments, stance labels, or personality labels of participants.',
+        'Do not invent occupational labels such as planner, designer, engineer, or owner unless those labels were explicitly stated in the dialogue itself.',
         'Summarize the current state, point to one or two concrete next angles, and explicitly invite the relevant participant names when useful.',
+        'Prefer broad prompts or targeted follow-up based on what they actually said. Avoid speaking again immediately after your own previous facilitation turn unless the discussion is stalled.',
         'Use 2 to 4 sentences. Do not output JSON or bullet lists.'
       ].filter(Boolean).join('\n\n')
     }
@@ -1270,6 +1417,8 @@ export class MeetingOrchestrator {
         : '',
       'Reply in Japanese with one short conversational turn for the meeting.',
       'React to a specific prior point, mention the target agent name explicitly when responding to someone, and add one concrete refinement, concern, question, or synthesis.',
+      'Do not assume hidden roles, departments, stance labels, or personality labels of the other agents. React only to what they actually said.',
+      'Do not invent occupational labels such as planner, designer, engineer, or owner unless those labels were explicitly stated in the dialogue itself.',
       'Use 2 to 4 sentences. Do not output JSON or bullet lists.'
     ].filter(Boolean).join('\n\n')
   }
@@ -1279,11 +1428,13 @@ export class MeetingOrchestrator {
     return [
       getSafeSharedPromptContext(session),
       'Summarize the discussion in Japanese.',
-      'Create exactly four numbered sections with these titles:',
+      'Create exactly five numbered sections with these titles:',
       '1. 結論サマリー',
-      '2. 共通認識',
-      '3. 残課題',
-      '4. 次のアクション',
+      '2. 詳細な解説',
+      '3. 共通認識',
+      '4. 残課題',
+      '5. 次のアクション',
+      'In section 2, explain the reasoning path, key tradeoffs, and why the conclusion was reached in more detail than section 1.',
       'Write each section as plain paragraphs, not bullets unless necessary.',
       `Discussion log: ${transcript}`
     ].join('\n\n')

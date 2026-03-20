@@ -1,4 +1,12 @@
 import { create } from 'zustand'
+import {
+  PERSONALITY_PRESETS,
+  PERSONALITY_VALUE_ALIASES,
+  STANCE_PRESETS,
+  STANCE_VALUE_ALIASES,
+  normalizeSelectableValue
+} from '../config/agentMetadata'
+import { getDefaultBuiltInAgentIcon, type BuiltInAgentIconId } from '../config/iconAssets'
 import { apiRequestJson } from '../lib/apiClient'
 
 export type AgentRole = 'Participant' | 'Facilitator'
@@ -47,6 +55,9 @@ export interface AgentProfile {
   role: AgentRole
   stance: string
   personality: string
+  avatarPreset: BuiltInAgentIconId | null
+  avatarCustomDataUrl: string | null
+  avatarCustomName: string | null
   provider: AgentCliProvider
   model: string
   reasoningEffort: ReasoningEffort
@@ -128,6 +139,7 @@ interface TurtleBrainState {
   finalConclusion: string | null
   sessionError: string | null
   backendSessionId: string | null
+  sessionRunNonce: number
   orchestrationDebug: OrchestrationDebug | null
   providerCatalogs: ProviderCatalogMap
   providerCatalogStatus: 'idle' | 'loading' | 'ready' | 'error'
@@ -143,6 +155,8 @@ interface TurtleBrainState {
   removeAgent: (id: string) => void
   resetAgentsToDefault: () => void
   resetAgentToDefault: (id: string) => void
+  saveSettings: () => void
+  clearSavedSettings: () => void
   refreshProviderCatalogs: (force?: boolean) => Promise<void>
   startSession: (topic: string, inputPaths?: string[]) => void
   stopSession: () => void
@@ -330,14 +344,41 @@ function cloneCatalogs(catalogs: ProviderCatalogMap): ProviderCatalogMap {
   }
 }
 
+function normalizeAgentSelections<T extends { stance: string; personality: string }>(agent: T): T {
+  return {
+    ...agent,
+    stance: normalizeSelectableValue(agent.stance, STANCE_PRESETS, STANCE_VALUE_ALIASES),
+    personality: normalizeSelectableValue(agent.personality, PERSONALITY_PRESETS, PERSONALITY_VALUE_ALIASES)
+  }
+}
+
+function ensureAgentAvatarState(agent: AgentProfile, index = 0): AgentProfile {
+  const rawAgent = agent as AgentProfile & {
+    avatarPreset?: BuiltInAgentIconId | null
+    avatarCustomDataUrl?: string | null
+    avatarCustomName?: string | null
+  }
+
+  return {
+    ...agent,
+    avatarPreset:
+      rawAgent.avatarPreset === undefined ? getDefaultBuiltInAgentIcon(index) : (rawAgent.avatarPreset ?? null),
+    avatarCustomDataUrl: rawAgent.avatarCustomDataUrl ?? null,
+    avatarCustomName: rawAgent.avatarCustomName ?? null
+  }
+}
+
 function createAgent(
   partial: Pick<AgentProfile, 'id' | 'name' | 'role' | 'stance' | 'personality'> &
-    Partial<Pick<AgentProfile, 'provider' | 'model' | 'reasoningEffort'>>
+    Partial<Pick<AgentProfile, 'provider' | 'model' | 'reasoningEffort' | 'avatarPreset' | 'avatarCustomDataUrl' | 'avatarCustomName'>>
 ): AgentProfile {
-  return {
+  const baseAgent: AgentProfile = {
     provider: partial.provider ?? 'codex',
     model: partial.model ?? 'gpt-5.4',
     reasoningEffort: partial.reasoningEffort ?? 'medium',
+    avatarPreset: partial.avatarPreset ?? null,
+    avatarCustomDataUrl: partial.avatarCustomDataUrl ?? null,
+    avatarCustomName: partial.avatarCustomName ?? null,
     runtimeSessionId: null,
     rateLimits: createEmptyRateLimits(),
     status: 'idle',
@@ -345,6 +386,8 @@ function createAgent(
     speakCount: 0,
     ...partial
   }
+
+  return ensureAgentAvatarState(normalizeAgentSelections(baseAgent))
 }
 
 const conversationDefaultAgents: AgentProfile[] = [
@@ -352,8 +395,9 @@ const conversationDefaultAgents: AgentProfile[] = [
     id: 'agent-1',
     name: 'エージェントA',
     role: 'Participant',
-    stance: '発散・アイデア重視',
+    stance: 'アイデア出し・新規性重視',
     personality: '率直・論理的',
+    avatarPreset: 'user_icon1',
     provider: 'codex',
     model: 'gpt-5.4'
   }),
@@ -361,8 +405,9 @@ const conversationDefaultAgents: AgentProfile[] = [
     id: 'agent-2',
     name: 'エージェントB',
     role: 'Participant',
-    stance: '探究的・批判的',
+    stance: '批判的・データ重視',
     personality: '丁寧・堅実',
+    avatarPreset: 'user_icon2',
     provider: 'copilot',
     model: 'gpt-5.2'
   })
@@ -373,8 +418,9 @@ const meetingDefaultAgents: AgentProfile[] = [
     id: 'agent-1',
     name: 'エージェントA',
     role: 'Participant',
-    stance: '発散・アイデア重視',
+    stance: 'アイデア出し・新規性重視',
     personality: '率直・論理的',
+    avatarPreset: 'user_icon1',
     provider: 'codex',
     model: 'gpt-5.4'
   }),
@@ -382,8 +428,9 @@ const meetingDefaultAgents: AgentProfile[] = [
     id: 'agent-2',
     name: 'エージェントB',
     role: 'Participant',
-    stance: '品質・リスク管理',
+    stance: '品質重視・リスク分析',
     personality: '慎重・分析的',
+    avatarPreset: 'user_icon2',
     provider: 'copilot',
     model: 'gpt-5.2'
   }),
@@ -391,8 +438,9 @@ const meetingDefaultAgents: AgentProfile[] = [
     id: 'agent-3',
     name: 'エージェントC',
     role: 'Participant',
-    stance: 'ユーザー価値重視',
+    stance: 'ユーザー目線',
     personality: '前向き・協調的',
+    avatarPreset: 'user_icon3',
     provider: 'gemini',
     model: 'gemini-2.5-flash'
   }),
@@ -400,16 +448,17 @@ const meetingDefaultAgents: AgentProfile[] = [
     id: 'moderator',
     name: 'ファシリテータ',
     role: 'Facilitator',
-    stance: '中立・バランス',
+    stance: '中立・合意形成重視',
     personality: '丁寧・俯瞰的',
+    avatarPreset: 'user_icon4',
     provider: 'codex',
     model: 'gpt-5.4'
   })
 ]
 
 function cloneAgents(agents: AgentProfile[]): AgentProfile[] {
-  return agents.map((agent) => ({
-    ...agent,
+  return agents.map((agent, index) => ({
+    ...ensureAgentAvatarState(normalizeAgentSelections(agent), index),
     rateLimits: agent.rateLimits
       ? {
           source: agent.rateLimits.source,
@@ -438,6 +487,82 @@ function getDiscussionStyleDefaults(style: DiscussionStyle): {
     turnLimit: 3,
     handRaiseMode: 'rule-based'
   }
+}
+
+const SETTINGS_STORAGE_KEY = 'turtle-brain:settings:v1'
+
+interface PersistedSettingsSnapshot {
+  version: 1
+  discussionStyle: DiscussionStyle
+  executionMode: ExecutionMode
+  handRaiseMode: HandRaiseMode
+  turnLimit: number
+  agents: AgentProfile[]
+}
+
+function canUseLocalStorage(): boolean {
+  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+}
+
+function loadPersistedSettings(): PersistedSettingsSnapshot | null {
+  if (!canUseLocalStorage()) {
+    return null
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY)
+    if (!raw) {
+      return null
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersistedSettingsSnapshot>
+    if (parsed.version !== 1) {
+      return null
+    }
+
+    const discussionStyle: DiscussionStyle =
+      parsed.discussionStyle === 'meeting' ? 'meeting' : 'conversation'
+    const executionMode: ExecutionMode =
+      parsed.executionMode === 'autonomous' ? 'autonomous' : 'orchestration'
+    const handRaiseMode: HandRaiseMode =
+      parsed.handRaiseMode === 'ai-evaluation' ? 'ai-evaluation' : 'rule-based'
+    const turnLimit =
+      typeof parsed.turnLimit === 'number' && Number.isFinite(parsed.turnLimit)
+        ? Math.max(1, Math.min(12, Math.trunc(parsed.turnLimit)))
+        : getDiscussionStyleDefaults(discussionStyle).turnLimit
+
+    const fallbackAgents = getDiscussionStyleDefaults(discussionStyle).agents
+    const agents = Array.isArray(parsed.agents) && parsed.agents.length > 0
+      ? sanitizeAgents(parsed.agents as AgentProfile[])
+      : fallbackAgents
+
+    return {
+      version: 1,
+      discussionStyle,
+      executionMode,
+      handRaiseMode,
+      turnLimit,
+      agents
+    }
+  } catch {
+    return null
+  }
+}
+
+function writePersistedSettings(snapshot: PersistedSettingsSnapshot): void {
+  if (!canUseLocalStorage()) {
+    return
+  }
+
+  window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(snapshot))
+}
+
+function removePersistedSettings(): void {
+  if (!canUseLocalStorage()) {
+    return
+  }
+
+  window.localStorage.removeItem(SETTINGS_STORAGE_KEY)
 }
 
 const REQUIRED_BACKEND_FEATURE_MARKER = 'copilot-sdk-bridge-v3'
@@ -503,8 +628,8 @@ function getAgentInteractionErrorMessage(error: unknown, details?: string): stri
 }
 
 function sanitizeAgents(agents: AgentProfile[]): AgentProfile[] {
-  return agents.map((agent) => ({
-    ...agent,
+  return agents.map((agent, index) => ({
+    ...ensureAgentAvatarState(normalizeAgentSelections(agent), index),
     runtimeSessionId: null,
     rateLimits: agent.rateLimits ?? createEmptyRateLimits(),
     status: 'idle',
@@ -514,22 +639,23 @@ function sanitizeAgents(agents: AgentProfile[]): AgentProfile[] {
 }
 
 function reconcileAgentsWithCatalogs(agents: AgentProfile[], catalogs: ProviderCatalogMap): AgentProfile[] {
-  return agents.map((agent) => {
+  return agents.map((agent, index) => {
+    const normalizedAgent = ensureAgentAvatarState(normalizeAgentSelections(agent), index)
     const providerCatalog = catalogs[agent.provider]
     const models = providerCatalog?.models ?? []
-    const matchedModel = models.find((model) => model.id === agent.model)
-    const resolvedModel = matchedModel?.id ?? models[0]?.id ?? agent.model
+    const matchedModel = models.find((model) => model.id === normalizedAgent.model)
+    const resolvedModel = matchedModel?.id ?? models[0]?.id ?? normalizedAgent.model
     const supportedReasoning = (matchedModel ?? models[0])?.supportedReasoningEfforts ?? []
 
     const reasoningEffort =
       supportedReasoning.length === 0
-        ? agent.reasoningEffort
-        : supportedReasoning.includes(agent.reasoningEffort)
-          ? agent.reasoningEffort
-          : (matchedModel ?? models[0])?.defaultReasoningEffort ?? supportedReasoning[0] ?? agent.reasoningEffort
+        ? normalizedAgent.reasoningEffort
+        : supportedReasoning.includes(normalizedAgent.reasoningEffort)
+          ? normalizedAgent.reasoningEffort
+          : (matchedModel ?? models[0])?.defaultReasoningEffort ?? supportedReasoning[0] ?? normalizedAgent.reasoningEffort
 
     return {
-      ...agent,
+      ...normalizedAgent,
       model: resolvedModel,
       reasoningEffort
     }
@@ -557,21 +683,25 @@ function normalizeCatalog(raw: ProviderCatalog, fallback: ProviderCatalog): Prov
   }
 }
 
+let currentTurnAbortController: AbortController | null = null
+const persistedSettings = loadPersistedSettings()
+
 export const useStore = create<TurtleBrainState>((set, get) => ({
-  agents: cloneAgents(conversationDefaultAgents),
+  agents: persistedSettings?.agents ?? cloneAgents(conversationDefaultAgents),
   topic: '',
   inputPaths: [],
-  turnLimit: 3,
+  turnLimit: persistedSettings?.turnLimit ?? 3,
   currentTurn: 0,
   environment: 'sandbox',
-  handRaiseMode: 'rule-based',
-  executionMode: 'orchestration',
-  discussionStyle: 'conversation',
+  handRaiseMode: persistedSettings?.handRaiseMode ?? 'rule-based',
+  executionMode: persistedSettings?.executionMode ?? 'orchestration',
+  discussionStyle: persistedSettings?.discussionStyle ?? 'conversation',
   messages: [],
   sessionStatus: 'idle',
   finalConclusion: null,
   sessionError: null,
   backendSessionId: null,
+  sessionRunNonce: 0,
   orchestrationDebug: null,
   providerCatalogs: getDefaultCatalogs(),
   providerCatalogStatus: 'idle',
@@ -588,6 +718,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       finalConclusion: null,
       sessionError: null,
       backendSessionId: null,
+      sessionRunNonce: 0,
       orchestrationDebug: null,
       sessionStatus: 'idle'
     })),
@@ -601,6 +732,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       finalConclusion: null,
       sessionError: null,
       backendSessionId: null,
+      sessionRunNonce: 0,
       orchestrationDebug: null,
       sessionStatus: 'idle'
     })),
@@ -610,18 +742,24 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
 
   addAgent: (agent) =>
     set((state) => ({
-      agents: [...state.agents, { ...agent, rateLimits: agent.rateLimits ?? createEmptyRateLimits() }]
+      agents: [
+        ...state.agents,
+        ensureAgentAvatarState(
+          normalizeAgentSelections({ ...agent, rateLimits: agent.rateLimits ?? createEmptyRateLimits() }),
+          state.agents.length
+        )
+      ]
     })),
 
   updateAgent: (id, updates) =>
     set((state) => ({
-      agents: state.agents.map((agent) =>
+      agents: state.agents.map((agent, index) =>
         agent.id === id
-          ? {
+          ? ensureAgentAvatarState(normalizeAgentSelections({
               ...agent,
               ...updates,
               rateLimits: updates.rateLimits ?? agent.rateLimits
-            }
+            }), index)
           : agent
       )
     })),
@@ -648,6 +786,45 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         agents: state.agents.map((agent) => (agent.id === id ? { ...defaultAgent } : agent))
       }
     }),
+
+  saveSettings: () => {
+    const state = get()
+    writePersistedSettings({
+      version: 1,
+      discussionStyle: state.discussionStyle,
+      executionMode: state.executionMode,
+      handRaiseMode: state.handRaiseMode,
+      turnLimit: state.turnLimit,
+      agents: sanitizeAgents(state.agents)
+    })
+  },
+
+  clearSavedSettings: () => {
+    currentTurnAbortController?.abort()
+    currentTurnAbortController = null
+    removePersistedSettings()
+
+    const defaultStyle: DiscussionStyle = 'conversation'
+    const defaults = getDiscussionStyleDefaults(defaultStyle)
+
+    set((state) => ({
+      agents: defaults.agents,
+      topic: '',
+      inputPaths: [],
+      turnLimit: defaults.turnLimit,
+      currentTurn: 0,
+      handRaiseMode: defaults.handRaiseMode,
+      executionMode: 'orchestration',
+      discussionStyle: defaultStyle,
+      messages: [],
+      sessionStatus: 'idle',
+      finalConclusion: null,
+      sessionError: null,
+      backendSessionId: null,
+      sessionRunNonce: state.sessionRunNonce + 1,
+      orchestrationDebug: null
+    }))
+  },
 
   refreshProviderCatalogs: async (force = false) => {
     const fallbackCatalogs = getDefaultCatalogs()
@@ -699,6 +876,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       topic: topic.trim(),
       inputPaths,
       sessionStatus: 'running',
+      sessionRunNonce: state.sessionRunNonce + 1,
       currentTurn: 1,
       messages: [],
       finalConclusion: null,
@@ -708,29 +886,60 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       agents: sanitizeAgents(state.agents)
     })),
 
-  stopSession: () => set({ sessionStatus: 'finished' }),
+  stopSession: () => {
+    currentTurnAbortController?.abort()
+    currentTurnAbortController = null
+
+    const state = get()
+    const sessionId = state.backendSessionId
+
+    set((current) => ({
+      sessionStatus: 'finished',
+      sessionRunNonce: current.sessionRunNonce + 1
+    }))
+
+    if (sessionId) {
+      void apiRequestJson<{ success?: boolean; stopped?: boolean }>('/api/orchestrator/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId })
+      }).catch((error) => {
+        console.error('Failed to stop backend session:', error)
+      })
+    }
+  },
 
   clearSessionError: () => set({ sessionError: null }),
 
   resetSession: () =>
-    set((state) => ({
-      topic: '',
-      inputPaths: [],
-      sessionStatus: 'idle',
-      messages: [],
-      currentTurn: 0,
-      finalConclusion: null,
-      sessionError: null,
-      backendSessionId: null,
-      orchestrationDebug: null,
-      agents: sanitizeAgents(state.agents)
-    })),
+    set((state) => {
+      currentTurnAbortController?.abort()
+      currentTurnAbortController = null
+
+      return {
+        topic: '',
+        inputPaths: [],
+        sessionStatus: 'idle',
+        messages: [],
+        currentTurn: 0,
+        finalConclusion: null,
+        sessionError: null,
+        backendSessionId: null,
+        sessionRunNonce: state.sessionRunNonce + 1,
+        orchestrationDebug: null,
+        agents: sanitizeAgents(state.agents)
+      }
+    }),
 
   processNextTurn: async () => {
     const state = get()
     if (state.sessionStatus !== 'running') {
       return
     }
+
+    const runNonce = state.sessionRunNonce
+    const controller = new AbortController()
+    currentTurnAbortController = controller
 
     try {
       await ensureCopilotBackendReady(state.agents)
@@ -749,6 +958,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       }>('/api/orchestrator/run-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           sessionId: state.backendSessionId,
           topic: state.topic,
@@ -763,9 +973,14 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         throw new Error(data.details || data.error || 'オーケストレーションの実行に失敗しました。')
       }
 
+      const latestState = get()
+      if (latestState.sessionRunNonce !== runNonce || latestState.sessionStatus !== 'running') {
+        return
+      }
+
       set({
         backendSessionId: data.sessionId,
-        agents: data.agents,
+        agents: data.agents.map((agent, index) => ensureAgentAvatarState(normalizeAgentSelections(agent), index)),
         messages: data.messages,
         currentTurn: data.currentTurn,
         sessionStatus: data.sessionStatus,
@@ -774,11 +989,19 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         sessionError: null
       })
     } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        return
+      }
+
       console.error('Agent interaction failed:', error)
       set({
         sessionStatus: 'finished',
         sessionError: getAgentInteractionErrorMessage(error)
       })
+    } finally {
+      if (currentTurnAbortController === controller) {
+        currentTurnAbortController = null
+      }
     }
   }
 }))

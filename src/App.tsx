@@ -10,12 +10,13 @@ import {
   Settings,
   Square,
   Upload,
-  User,
   X
 } from 'lucide-react'
+import { AgentAvatar } from './components/AgentAvatar'
 import { AgentRuntimeMeta } from './components/AgentRuntimeMeta'
 import { SettingsModal } from './components/SettingsModal'
 import { PROVIDER_LABELS, formatAgentRole } from './config/agentMetadata'
+import { TITLE_ICON_SRC } from './config/iconAssets'
 import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from './config/modeMetadata'
 import { apiRequestJson } from './lib/apiClient'
 import { useStore, type AgentProfile, type Message } from './store/useStore'
@@ -229,10 +230,22 @@ function findReferencedMessages(
 }
 
 function scrollToMessage(messageId: string): void {
-  document.getElementById(`message-${messageId}`)?.scrollIntoView({
+  const target = document.getElementById(`message-${messageId}`)
+  if (!(target instanceof HTMLElement)) {
+    return
+  }
+
+  target.classList.remove('ring-2', 'ring-cyan-400/90', 'shadow-[0_0_0_1px_rgba(34,211,238,0.55)]')
+
+  target.scrollIntoView({
     behavior: 'smooth',
     block: 'center'
   })
+  target.focus({ preventScroll: true })
+  target.classList.add('ring-2', 'ring-cyan-400/90', 'shadow-[0_0_0_1px_rgba(34,211,238,0.55)]')
+  window.setTimeout(() => {
+    target.classList.remove('ring-2', 'ring-cyan-400/90', 'shadow-[0_0_0_1px_rgba(34,211,238,0.55)]')
+  }, 1800)
 }
 
 function sanitizeFilename(value: string): string {
@@ -543,8 +556,8 @@ function App() {
 
       <aside className="glass-panel z-20 flex w-80 shrink-0 flex-col border-r border-slate-700/50">
         <div className="flex items-center gap-3 border-b border-slate-700/50 p-6">
-          <div className="rounded-lg bg-cyan-500/20 p-2 text-cyan-400">
-            <BrainCircuit size={28} />
+          <div className="flex h-[72px] w-[72px] items-center justify-center overflow-hidden rounded-2xl border border-cyan-500/20 bg-cyan-500/10">
+            <img src={TITLE_ICON_SRC} alt="Turtle Brain" className="h-full w-full object-cover" />
           </div>
           <div>
             <h1 className="bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-xl font-bold text-transparent">
@@ -690,22 +703,29 @@ function App() {
               {agents.map((agent) => (
                 <div key={agent.id} className="rounded-xl border border-slate-700/50 bg-slate-800/50 p-3.5">
                   <div className="flex items-start gap-3">
-                    <div
-                      className={`rounded-lg p-2 ${
+                    <AgentAvatar
+                      size={48}
+                      avatarPreset={agent.avatarPreset}
+                      avatarCustomDataUrl={agent.avatarCustomDataUrl}
+                      alt={`${agent.name} アイコン`}
+                      className="rounded-lg border border-slate-700/60"
+                      fallbackClassName={
                         agent.role === 'Facilitator'
                           ? 'bg-amber-500/20 text-amber-400'
                           : 'bg-cyan-500/20 text-cyan-400'
-                      }`}
-                    >
-                      <User size={16} />
-                    </div>
+                      }
+                      iconClassName={agent.role === 'Facilitator' ? 'text-amber-400' : 'text-cyan-400'}
+                    />
 
                     <div className="min-w-0 flex-1" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                       <p className="truncate text-sm font-semibold text-slate-100">{agent.name}</p>
                       <p className="text-xs text-slate-400">{formatAgentRole(agent.role)}</p>
                       <p className="mt-2 text-xs text-slate-300">スタンス: {agent.stance}</p>
                       <p className="mt-1 text-xs text-slate-300">性格: {agent.personality}</p>
-                      <p className="mt-2 text-xs text-slate-500">
+                      <p
+                        className="mt-2 min-h-[40px] text-xs leading-5 text-slate-500"
+                        style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                      >
                         {agent.provider === 'codex' ? 'Codex CLI' : agent.provider === 'gemini' ? 'Gemini CLI' : 'GitHub Copilot CLI'} / {agent.model}
                       </p>
                     </div>
@@ -721,7 +741,7 @@ function App() {
         <div className="pointer-events-none absolute left-1/4 top-1/4 h-96 w-96 rounded-full bg-cyan-500/10 blur-[100px]" />
         <div className="pointer-events-none absolute bottom-1/4 right-1/4 h-96 w-96 rounded-full bg-blue-500/10 blur-[100px]" />
 
-        <header className="glass-panel relative z-10 shrink-0 border-b border-slate-700/50 px-6 py-5">
+        <header className="glass-panel relative z-10 shrink-0 border-b border-slate-700/50 px-6 py-4">
           <div className="mx-auto max-w-7xl space-y-4">
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1.8fr)_minmax(340px,1fr)_220px]">
               <div className="space-y-2">
@@ -818,26 +838,6 @@ function App() {
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <span className="rounded-full border border-slate-700/60 bg-slate-900/50 px-3 py-1 text-xs text-slate-300">
-                {discussionStyleInfo.label}
-              </span>
-              <span className="rounded-full border border-slate-700/60 bg-slate-900/50 px-3 py-1 text-xs text-slate-300">
-                {executionModeInfo.label}
-              </span>
-              <span className="rounded-full border border-slate-700/60 bg-slate-900/50 px-3 py-1 text-xs text-slate-300">
-                エージェント {agents.length}
-              </span>
-              <span className="rounded-full border border-slate-700/60 bg-slate-900/50 px-3 py-1 text-xs text-slate-300">
-                入力パス {sessionStatus === 'running' || sessionStatus === 'finished' ? inputPaths.length : pendingInputPaths.length}
-              </span>
-              {backendSessionId && (
-                <span className="rounded-full border border-slate-700/60 bg-slate-900/50 px-3 py-1 text-xs font-mono text-slate-400">
-                  {backendSessionId}
-                </span>
-              )}
-            </div>
-
             {sessionError && (
               <div className="flex items-start justify-between gap-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
                 <p>{sessionError}</p>
@@ -852,7 +852,7 @@ function App() {
           </div>
         </header>
 
-        <div className="relative z-10 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-6">
+        <div className="relative z-10 min-h-0 flex-1 space-y-5 overflow-y-auto p-6">
           {sessionStatus === 'idle' && messages.length === 0 ? (
             <div className="flex flex-1 items-center justify-center rounded-2xl border-2 border-dashed border-slate-700/50 bg-slate-800/30">
               <div className="space-y-4 text-center">
@@ -868,7 +868,7 @@ function App() {
               </div>
             </div>
           ) : (
-            <div className="flex items-stretch justify-start gap-6 overflow-x-auto overflow-y-visible pb-2 pr-2">
+            <div className="flex items-start justify-start gap-6 overflow-x-auto overflow-y-visible pb-2 pr-2">
               {agents.map((agent) => {
                 const tone = getAgentPanelTone(agent)
                 const statusBadge = getStatusBadge(agent)
@@ -878,14 +878,20 @@ function App() {
                 return (
                   <section
                     key={agent.id}
-                    className={`glass-panel flex min-w-[420px] max-w-[520px] basis-[460px] shrink-0 flex-col self-stretch rounded-2xl border min-h-[640px] min-w-0 ${tone.card}`}
+                    className={`glass-panel flex min-w-[420px] max-w-[520px] basis-[460px] shrink-0 flex-col self-start overflow-hidden rounded-2xl border min-h-[640px] min-w-0 ${tone.card}`}
                   >
                     <div className={`border-b border-slate-700/50 p-4 ${tone.header}`}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex min-w-0 items-center gap-3">
-                          <div className={`rounded-xl p-2.5 ${tone.icon}`}>
-                            <User size={18} />
-                          </div>
+                          <AgentAvatar
+                            size={64}
+                            avatarPreset={agent.avatarPreset}
+                            avatarCustomDataUrl={agent.avatarCustomDataUrl}
+                            alt={`${agent.name} アイコン`}
+                            className="rounded-xl border border-slate-700/60"
+                            fallbackClassName={tone.icon}
+                            iconClassName={agent.role === 'Facilitator' ? 'text-amber-400' : 'text-cyan-400'}
+                          />
                           <div className="min-w-0">
                             <h3 className="truncate text-lg font-bold text-slate-100">{agent.name}</h3>
                             <p className="text-sm text-slate-400">{formatAgentRole(agent.role)}</p>
@@ -1007,7 +1013,7 @@ function App() {
                       </div>
                     </div>
 
-                    <div className="flex flex-1 flex-col gap-3 p-3">
+                    <div className="flex flex-col gap-3 p-3">
                       {agentMessages.length === 0 ? (
                         <div className="rounded-xl border border-dashed border-slate-700/50 p-4 text-sm text-slate-500">
                           このエージェントの発言はまだありません。
@@ -1023,12 +1029,17 @@ function App() {
                           )
 
                           return (
-                            <article id={`message-${message.id}`} key={message.id} className={`min-w-0 overflow-hidden rounded-xl border p-3 ${tone.message}`}>
-                              <div className="mb-2 flex items-center justify-between gap-3">
-                                <p className={`text-sm font-semibold ${tone.accentText}`}>
+                            <article
+                              id={`message-${message.id}`}
+                              key={message.id}
+                              tabIndex={-1}
+                              className={`min-w-0 max-w-full overflow-hidden rounded-xl border p-3 outline-none transition-shadow focus:ring-2 focus:ring-cyan-400 ${tone.message}`}
+                            >
+                              <div className="mb-2 flex min-w-0 items-start justify-between gap-3">
+                                <p className={`min-w-0 break-words text-sm font-semibold ${tone.accentText}`}>
                                   {agent.role === 'Facilitator' ? `${index + 1}件目の進行` : `${index + 1}件目の発言`}
                                 </p>
-                                <div className="text-right text-xs text-slate-400">
+                                <div className="shrink-0 text-right text-xs text-slate-400">
                                   <p>全体 {globalOrder} 件目</p>
                                   <p>{formatClock(message.timestamp)}</p>
                                 </div>
@@ -1050,7 +1061,7 @@ function App() {
                                         key={reference.messageId}
                                         onClick={() => scrollToMessage(reference.messageId)}
                                         title={reference.summary}
-                                        className="rounded-lg border border-cyan-700/40 bg-cyan-900/20 px-2.5 py-1.5 text-xs text-cyan-200 transition-colors hover:bg-cyan-900/30"
+                                        className="rounded-lg border border-cyan-700/40 bg-cyan-900/20 px-2.5 py-1.5 text-xs font-medium text-cyan-200 transition-all hover:border-cyan-400/70 hover:bg-cyan-800/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
                                       >
                                         {reference.label}
                                       </button>
@@ -1070,7 +1081,7 @@ function App() {
           )}
 
           {finalConclusion && (
-            <section className="glass-panel mb-1 max-h-[68vh] min-h-[520px] shrink-0 overflow-y-auto rounded-2xl border-t-4 border-cyan-500 bg-slate-800/80 p-6 shadow-2xl shadow-cyan-900/20">
+            <section className="glass-panel mt-5 mb-1 shrink-0 rounded-2xl border-t-4 border-cyan-500 bg-slate-800/80 p-6 shadow-2xl shadow-cyan-900/20">
               <div className="mb-4 flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
                   <div className="rounded-xl bg-cyan-500/15 p-2 text-cyan-400">
