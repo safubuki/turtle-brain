@@ -1,18 +1,8 @@
 import { PROVIDER_LABELS, formatReasoningEffort } from '../config/agentMetadata'
-import { useStore, type AgentProfile, type RateLimitWindow } from '../store/useStore'
-
-function formatRateLimit(window: RateLimitWindow | null): string {
-  if (!window) {
-    return '--'
-  }
-
-  const remaining = window.remaining ?? '?'
-  const limit = window.limit ?? '?'
-  return `${remaining}/${limit}`
-}
+import { useStore, type AgentProfile } from '../store/useStore'
 
 interface AgentRuntimeMetaProps {
-  agent: Pick<AgentProfile, 'provider' | 'model' | 'reasoningEffort' | 'rateLimits'>
+  agent: Pick<AgentProfile, 'provider' | 'model' | 'reasoningEffort'>
   compact?: boolean
 }
 
@@ -22,35 +12,47 @@ export function AgentRuntimeMeta({ agent, compact = false }: AgentRuntimeMetaPro
   const showReasoning = (modelInfo?.supportedReasoningEfforts?.length ?? 0) > 0
   const baseTextClass = compact ? 'text-[11px]' : 'text-xs'
   const valueTextClass = compact ? 'text-slate-100' : 'text-slate-200'
+  const topGridClass = showReasoning ? 'grid-cols-3' : 'grid-cols-2'
 
   return (
-    <div className="space-y-2">
-      <div className={`grid gap-2 ${compact ? 'grid-cols-1' : showReasoning ? 'grid-cols-3' : 'grid-cols-2'}`}>
-        <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
+    <div className="min-w-0 space-y-2">
+      <div className={`grid gap-2 ${topGridClass}`}>
+        <div className="flex min-h-[76px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
           <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>CLI</p>
-          <p className={`mt-1 ${valueTextClass}`}>{PROVIDER_LABELS[agent.provider]}</p>
+          <p
+            className={`mt-1 overflow-hidden break-words ${valueTextClass}`}
+            style={{
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflowWrap: 'anywhere',
+              wordBreak: 'break-word'
+            }}
+          >
+            {PROVIDER_LABELS[agent.provider]}
+          </p>
         </div>
-        <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
+        <div className="flex min-h-[76px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
           <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>Model</p>
-          <p className={`mt-1 break-all ${valueTextClass}`}>{agent.model}</p>
+          <p
+            className={`mt-1 overflow-hidden break-words ${valueTextClass}`}
+            style={{
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflowWrap: 'anywhere',
+              wordBreak: 'break-word'
+            }}
+          >
+            {agent.model}
+          </p>
         </div>
         {showReasoning && (
-          <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
+          <div className="flex min-h-[76px] min-w-0 flex-col rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
             <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>Reasoning</p>
-            <p className={`mt-1 ${valueTextClass}`}>{formatReasoningEffort(agent.reasoningEffort)}</p>
+            <p className={`mt-1 break-words ${valueTextClass}`}>{formatReasoningEffort(agent.reasoningEffort)}</p>
           </div>
         )}
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
-          <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>Daily</p>
-          <p className={`mt-1 font-mono ${valueTextClass}`}>{formatRateLimit(agent.rateLimits?.daily ?? null)}</p>
-        </div>
-        <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 px-3 py-2">
-          <p className={`${baseTextClass} uppercase tracking-wider text-slate-500`}>Weekly</p>
-          <p className={`mt-1 font-mono ${valueTextClass}`}>{formatRateLimit(agent.rateLimits?.weekly ?? null)}</p>
-        </div>
       </div>
     </div>
   )

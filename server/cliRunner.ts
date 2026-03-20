@@ -48,10 +48,61 @@ interface ModelRuntimeCapabilities {
   defaultReasoningEffort: ReasoningEffort | null
 }
 
+interface CopilotBridgeRequest {
+  sdkModulePath: string
+  workspaceRoot: string
+  model: string
+  prompt: string
+  reasoningEffort: ReasoningEffort | null
+  sessionId: string | null
+}
+
 const WORKSPACE_ROOT = path.resolve(__dirname, '..')
 
+function dedupeStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))]
+}
+
+function getCandidateNpmRoots(): string[] {
+  const pathRoots =
+    process.env.PATH?.split(path.delimiter)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .filter((entry) => /[\\/]npm$/i.test(entry) || /appdata[\\/]roaming[\\/]npm/i.test(entry)) ?? []
+
+  return dedupeStrings([
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : null,
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm') : null,
+    process.env.NPM_CONFIG_PREFIX || null,
+    process.env.npm_config_prefix || null,
+    ...pathRoots
+  ])
+}
+
+function sanitizeSessionId(sessionId: string | undefined | null): string | null {
+  if (!sessionId) {
+    return null
+  }
+
+  const trimmed = sessionId.trim()
+  if (!trimmed || trimmed.length > 160) {
+    return null
+  }
+
+  if (/[\r\n]/.test(trimmed)) {
+    return null
+  }
+
+  return trimmed
+}
+
+function shouldResumeSession(provider: AgentCliProvider): boolean {
+  void provider
+  return false
+}
+
 function getNpmRoot(): string {
-  return path.join(process.env.APPDATA ?? '', 'npm')
+  return getCandidateNpmRoots()[0] ?? path.join(process.env.APPDATA ?? '', 'npm')
 }
 
 function getCliCommandPath(provider: AgentCliProvider): string {
@@ -70,19 +121,47 @@ function getCliCommandPath(provider: AgentCliProvider): string {
 }
 
 function getCliScriptPath(provider: AgentCliProvider): string | null {
-  const npmRoot = getNpmRoot()
-  const packageRoot = path.join(npmRoot, 'node_modules')
+  const candidateRoots = getCandidateNpmRoots()
 
-  switch (provider) {
-    case 'codex':
-      return path.join(packageRoot, '@openai', 'codex', 'bin', 'codex.js')
-    case 'gemini':
-      return path.join(packageRoot, '@google', 'gemini-cli', 'dist', 'index.js')
-    case 'copilot':
-      return path.join(packageRoot, '@github', 'copilot', 'npm-loader.js')
-    default:
-      return null
+  for (const npmRoot of candidateRoots) {
+    const packageRoot = path.join(npmRoot, 'node_modules')
+
+    let candidatePath: string | null = null
+    switch (provider) {
+      case 'codex':
+        candidatePath = path.join(packageRoot, '@openai', 'codex', 'bin', 'codex.js')
+        break
+      case 'gemini':
+        candidatePath = path.join(packageRoot, '@google', 'gemini-cli', 'dist', 'index.js')
+        break
+      case 'copilot':
+        candidatePath = path.join(packageRoot, '@github', 'copilot', 'npm-loader.js')
+        break
+      default:
+        candidatePath = null
+    }
+
+    if (candidatePath && fs.existsSync(candidatePath)) {
+      return candidatePath
+    }
   }
+
+  return null
+}
+
+function getCopilotSdkModulePath(): string | null {
+  for (const npmRoot of getCandidateNpmRoots()) {
+    const sdkPath = path.join(npmRoot, 'node_modules', '@github', 'copilot', 'copilot-sdk', 'index.js')
+    if (fs.existsSync(sdkPath)) {
+      return sdkPath
+    }
+  }
+
+  return null
+}
+
+export function hasCopilotSdkRuntime(): boolean {
+  return getCopilotSdkModulePath() !== null
 }
 
 function resolveCliLauncher(provider: AgentCliProvider): CliLauncher {
@@ -319,6 +398,74 @@ function parseCodexOutput(
   }
 }
 
+async function runCopilotViaSdk(
+  options: CliRunOptions,
+  supportsReasoning: boolean
+): Promise<CliExecResult> {
+  const sdkModulePath = getCopilotSdkModulePath()
+  if (!sdkModulePath) {
+    throw new Error('GitHub Copilot SDK runtime is not available.')
+  }
+
+  const bridgePath = path.join(__dirname, 'copilotSdkBridge.mjs')
+  const prompt = buildPromptBody('copilot', options, supportsReasoning)
+  const payload: CopilotBridgeRequest = {
+    sdkModulePath,
+    workspaceRoot: WORKSPACE_ROOT,
+    model: options.model,
+    prompt,
+    reasoningEffort: supportsReasoning ? options.reasoningEffort : null,
+    sessionId: sanitizeSessionId(options.sessionId)
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [bridgePath], {
+      cwd: WORKSPACE_ROOT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true
+    })
+
+    let stdout = ''
+    let stderr = ''
+
+    child.stdin.on('error', () => {
+      // The bridge may close stdin after consuming the request body.
+    })
+
+    child.stdin.end(`${JSON.stringify(payload)}\n`)
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString()
+    })
+
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString()
+    })
+
+    child.on('error', (error) => {
+      reject(error)
+    })
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `copilot bridge exited with code ${code}`))
+        return
+      }
+
+      try {
+        const parsed = JSON.parse(stdout.trim()) as CliExecResult
+        resolve({
+          response: parsed.response,
+          sessionId: sanitizeSessionId(parsed.sessionId) ?? null,
+          rateLimits: parsed.rateLimits ?? null
+        })
+      } catch (error) {
+        reject(new Error(`Failed to parse Copilot bridge output: ${String(error)} / stdout: ${stdout} / stderr: ${stderr}`))
+      }
+    })
+  })
+}
+
 function getReadableDirectoryArgs(provider: AgentCliProvider): string[] {
   switch (provider) {
     case 'codex':
@@ -397,13 +544,14 @@ function buildProviderArgs(
 ): CliInvocation {
   const prompt = buildPromptBody(provider, options, supportsReasoning)
   const readableDirectoryArgs = getReadableDirectoryArgs(provider)
+  const resumableSessionId = shouldResumeSession(provider) ? sanitizeSessionId(options.sessionId) : null
 
   switch (provider) {
     case 'codex': {
       const sharedArgs = ['exec', '--json', '-C', WORKSPACE_ROOT, '-s', 'read-only', ...readableDirectoryArgs]
       const resultOutputArgs = outputFilePath ? ['-o', outputFilePath] : []
 
-      if (options.sessionId) {
+      if (resumableSessionId) {
         return {
           args: [
             ...sharedArgs,
@@ -412,7 +560,7 @@ function buildProviderArgs(
             options.model,
             '--skip-git-repo-check',
             ...resultOutputArgs,
-            options.sessionId,
+            resumableSessionId,
             '-'
           ],
           stdinPrompt: prompt
@@ -443,8 +591,8 @@ function buildProviderArgs(
         ...readableDirectoryArgs
       ]
 
-      if (options.sessionId) {
-        args.push('--resume', options.sessionId)
+      if (resumableSessionId) {
+        args.push('--resume', resumableSessionId)
       }
 
       return {
@@ -455,10 +603,7 @@ function buildProviderArgs(
 
     case 'copilot': {
       const args = [
-        '--output-format',
-        'json',
-        '--stream',
-        'off',
+        '--silent',
         '--model',
         options.model,
         '--allow-all-tools',
@@ -472,10 +617,6 @@ function buildProviderArgs(
         args.push('--reasoning-effort', options.reasoningEffort)
       }
 
-      if (options.sessionId) {
-        args.push('--resume', options.sessionId)
-      }
-
       return {
         args,
         stdinPrompt: prompt
@@ -485,14 +626,19 @@ function buildProviderArgs(
 }
 
 export async function runCli(options: CliRunOptions): Promise<CliExecResult> {
+  const capabilities = await getModelRuntimeCapabilities(options.provider, options.model)
+  const supportsReasoning = capabilities.supportedReasoningEfforts.length > 0
+
+  if (options.provider === 'copilot' && hasCopilotSdkRuntime()) {
+    return runCopilotViaSdk(options, supportsReasoning)
+  }
+
   const tmpOutFile =
     options.provider === 'codex'
       ? path.join(os.tmpdir(), `turtle-brain-codex-${Date.now()}.txt`)
       : undefined
 
   const launcher = resolveCliLauncher(options.provider)
-  const capabilities = await getModelRuntimeCapabilities(options.provider, options.model)
-  const supportsReasoning = capabilities.supportedReasoningEfforts.length > 0
   const invocation = buildProviderArgs(options.provider, options, tmpOutFile, supportsReasoning)
   const args = [
     ...launcher.prefixArgs,

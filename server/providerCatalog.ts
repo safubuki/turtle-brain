@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import { existsSync } from 'fs'
 import fs from 'fs/promises'
 import path from 'path'
 import { pathToFileURL } from 'url'
@@ -32,6 +33,37 @@ interface CachedCatalogs {
 
 const CACHE_TTL_MS = 5 * 60 * 1000
 let cachedCatalogs: CachedCatalogs | null = null
+
+function dedupeStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))]
+}
+
+function getCandidateNpmRoots(): string[] {
+  const pathRoots =
+    process.env.PATH?.split(path.delimiter)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .filter((entry) => /[\\/]npm$/i.test(entry) || /appdata[\\/]roaming[\\/]npm/i.test(entry)) ?? []
+
+  return dedupeStrings([
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : null,
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm') : null,
+    process.env.NPM_CONFIG_PREFIX || null,
+    process.env.npm_config_prefix || null,
+    ...pathRoots
+  ])
+}
+
+function getCopilotSdkModulePath(): string | null {
+  for (const npmRoot of getCandidateNpmRoots()) {
+    const sdkPath = path.join(npmRoot, 'node_modules', '@github', 'copilot', 'copilot-sdk', 'index.js')
+    if (existsSync(sdkPath)) {
+      return sdkPath
+    }
+  }
+
+  return null
+}
 
 function createFallbackCatalog(provider: AgentCliProvider, error: string | null = null): ProviderCatalogResponse {
   const now = new Date().toISOString()
@@ -292,15 +324,11 @@ async function discoverGeminiCatalog(): Promise<ProviderCatalogResponse> {
 }
 
 async function discoverCopilotCatalog(): Promise<ProviderCatalogResponse> {
-  const sdkPath = path.join(
-    process.env.APPDATA ?? '',
-    'npm',
-    'node_modules',
-    '@github',
-    'copilot',
-    'copilot-sdk',
-    'index.js'
-  )
+  const sdkPath = getCopilotSdkModulePath()
+  if (!sdkPath) {
+    throw new Error('GitHub Copilot SDK runtime is not available.')
+  }
+
   const sdkUrl = pathToFileURL(sdkPath).href
 
   const script = `

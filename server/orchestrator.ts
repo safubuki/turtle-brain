@@ -283,6 +283,21 @@ function getInboxPrompt(session: MeetingSession, speaker: RuntimeAgent, limit = 
     .join('\n')
 }
 
+function getSelfHistoryPrompt(session: MeetingSession, speaker: RuntimeAgent, limit = 2, excerptChars = 180): string {
+  return getSafeSelfHistoryPrompt(session, speaker, limit, excerptChars)
+  const ownMessages = session.messages.filter((message) => message.agentId === speaker.id).slice(-limit)
+  if (ownMessages.length === 0) {
+    return ''
+  }
+
+  return ownMessages
+    .map((message, index) => {
+      const globalOrder = session.messages.findIndex((entry) => entry.id === message.id) + 1
+      return `- 直近${index + 1}: 全体${globalOrder}件目 / ${buildPromptExcerpt(message.content, excerptChars)}`
+    })
+    .join('\n')
+}
+
 function getDesiredActionGuidance(desiredAction?: string): string {
   switch (desiredAction) {
     case 'agree':
@@ -371,9 +386,91 @@ function buildReasoningGuidance(reasoningEffort: ReasoningEffort): string {
 }
 
 function applyResultToAgent(agent: RuntimeAgent, result: CliExecResult): void {
-  agent.runtimeSessionId = result.sessionId ?? agent.runtimeSessionId
+  const sanitizedSessionId =
+    result.sessionId && result.sessionId.trim().length > 0 && result.sessionId.trim().length <= 160 && !/[\r\n]/.test(result.sessionId)
+      ? result.sessionId.trim()
+      : null
+
+  agent.runtimeSessionId = sanitizedSessionId ?? agent.runtimeSessionId
   if (result.rateLimits) {
     agent.rateLimits = result.rateLimits
+  }
+}
+
+function getSafeRecentDialogue(session: MeetingSession, limit = 6, excerptChars = 180): string {
+  const recentMessages = session.messages.slice(-limit)
+  if (recentMessages.length === 0) {
+    return 'No recent messages yet.'
+  }
+
+  return recentMessages
+    .map((message) => {
+      const agent = session.agents.find((entry) => entry.id === message.agentId)
+      return `- ${agent?.name ?? message.agentId}: ${buildPromptExcerpt(message.content, excerptChars)}`
+    })
+    .join('\n')
+}
+
+function getSafeSharedPromptContext(session: MeetingSession): string {
+  const parts = [`Topic: ${session.topic}`]
+
+  if (session.inputContextPrompt) {
+    parts.push(session.inputContextPrompt)
+  }
+
+  if (session.inputContextWarnings.length > 0) {
+    parts.push(`Input context warnings:\n${session.inputContextWarnings.join('\n')}`)
+  }
+
+  return parts.join('\n\n')
+}
+
+function getSafeReasoningGuidance(reasoningEffort: ReasoningEffort): string {
+  switch (reasoningEffort) {
+    case 'low':
+      return 'Reasoning effort is low. Prefer speed and simplicity.'
+    case 'high':
+      return 'Reasoning effort is high. Think carefully and be precise.'
+    case 'xhigh':
+      return 'Reasoning effort is xhigh. Use the strongest deliberation before answering.'
+    default:
+      return 'Reasoning effort is medium. Balance speed and quality.'
+  }
+}
+
+function getSafeSelfHistoryPrompt(
+  session: MeetingSession,
+  speaker: RuntimeAgent,
+  limit = 2,
+  excerptChars = 180
+): string {
+  const ownMessages = session.messages.filter((message) => message.agentId === speaker.id).slice(-limit)
+  if (ownMessages.length === 0) {
+    return ''
+  }
+
+  return ownMessages
+    .map((message, index) => {
+      const globalOrder = session.messages.findIndex((entry) => entry.id === message.id) + 1
+      return `- Your recent message ${index + 1}: global #${globalOrder} / ${buildPromptExcerpt(message.content, excerptChars)}`
+    })
+    .join('\n')
+}
+
+function getSafeDesiredActionGuidance(desiredAction?: string): string {
+  switch (desiredAction) {
+    case 'agree':
+      return 'Build on the previous point and add one useful implication.'
+    case 'challenge':
+      return 'Raise one concrete concern or counterpoint.'
+    case 'question':
+      return 'Ask one concrete question that helps the discussion move forward.'
+    case 'synthesize':
+      return 'Synthesize multiple points into one short direction or takeaway.'
+    case 'implement':
+      return 'Propose one concrete next step, experiment, or decision.'
+    default:
+      return 'Respond to the latest discussion with one useful, specific contribution.'
   }
 }
 
@@ -488,7 +585,7 @@ export class MeetingOrchestrator {
 
   private async runConversationTurn(session: MeetingSession): Promise<void> {
     const speaker = getNextConversationSpeaker(session)
-    const prompt = this.buildConversationPrompt(session, speaker)
+    const prompt = this.buildConversationPromptV2(session, speaker)
     const startedAt = Date.now()
     const result = await this.runCli({
       provider: speaker.provider,
@@ -549,7 +646,7 @@ export class MeetingOrchestrator {
     const participants = session.agents.filter((agent) => agent.role === 'Participant')
 
     if (session.messages.length === 0 && facilitator) {
-      const prompt = this.buildMeetingPrompt(session, facilitator, null, [])
+      const prompt = this.buildMeetingPromptV2(session, facilitator, null, [])
       const startedAt = Date.now()
       const result = await this.runCli({
         provider: facilitator.provider,
@@ -612,7 +709,7 @@ export class MeetingOrchestrator {
 
     const scoreTasks = participants.map(async (agent) => {
       const startedAt = Date.now()
-      const score = await this.scoreParticipant(session, agent)
+      const score = await this.scoreParticipantV2(session, agent)
       const finishedAt = Date.now()
       workerRuns.push({
         workerId: `score:${agent.id}`,
@@ -628,7 +725,7 @@ export class MeetingOrchestrator {
     const facilitatorTask = facilitator
       ? (async () => {
           const startedAt = Date.now()
-          const decision = await this.moderateMeeting(session, facilitator)
+          const decision = await this.moderateMeetingV2(session, facilitator)
           const finishedAt = Date.now()
           workerRuns.push({
             workerId: `moderation:${facilitator.id}`,
@@ -675,7 +772,7 @@ export class MeetingOrchestrator {
 
     const speechRuns = await Promise.all(
       plannedSpeakers.map(async (speaker) => {
-        const prompt = this.buildMeetingPrompt(session, speaker, facilitatorDecision, scores)
+        const prompt = this.buildMeetingPromptV2(session, speaker, facilitatorDecision, scores)
         const startedAt = Date.now()
         const result = await this.runCli({
           provider: speaker.provider,
@@ -764,12 +861,13 @@ export class MeetingOrchestrator {
       `議論ログ: ${transcript}`
     ].join('\n\n')
 
+    void prompt
     const startedAt = Date.now()
     const result = await this.runCli({
       provider: synthesizer.provider,
       model: synthesizer.model,
       reasoningEffort: synthesizer.reasoningEffort,
-      prompt,
+      prompt: this.buildFinalConclusionPromptV2(session),
       sessionId: synthesizer.runtimeSessionId ?? undefined
     })
     const finishedAt = Date.now()
@@ -851,6 +949,79 @@ export class MeetingOrchestrator {
     return parts.join('\n\n')
   }
 
+  private buildConversationPromptV2(session: MeetingSession, speaker: RuntimeAgent): string {
+    const transcript = getSafeRecentDialogue(session, 6, 180)
+    const lastOtherMessage = getLastOtherMessage(session, speaker, 180)
+    const inboxText = getInboxPrompt(session, speaker, 3, 140)
+    const selfHistory = getSelfHistoryPrompt(session, speaker, 2, 180)
+    const counterpartName =
+      session.agents.find((entry) => entry.id !== speaker.id && entry.role === 'Participant')?.name ?? '相手'
+
+    const parts = [
+      getSafeSharedPromptContext(session),
+      `You are ${speaker.name}. Your stance is "${speaker.stance}". Your personality is "${speaker.personality}".`,
+      getSafeReasoningGuidance(speaker.reasoningEffort)
+    ]
+
+    if (selfHistory) {
+      parts.push(`Your own recent messages:\n${selfHistory}`)
+    }
+
+    if (lastOtherMessage) {
+      parts.push(`Most recent message from another agent:\n${lastOtherMessage}`)
+    }
+
+    if (session.messages.length > 0) {
+      parts.push(`Recent dialogue:\n${transcript}`)
+    }
+
+    if (inboxText) {
+      parts.push(`Messages directly addressed to you:\n${inboxText}`)
+    }
+
+    parts.push('Reply in Japanese with one short but concrete conversational turn.')
+    parts.push('React to the latest point first, then add one useful agreement, concern, question, or refinement.')
+    parts.push(`If you refer to another agent, mention the exact agent name such as "${counterpartName}".`)
+    parts.push('Use 2 to 4 sentences. Do not output JSON, bullet lists, or stage directions.')
+    return parts.join('\n\n')
+  }
+
+  private async scoreParticipantV2(session: MeetingSession, agent: RuntimeAgent): Promise<ScoreDecision> {
+    const transcript = getRecentTranscript(session, 8)
+    const inboxText = agent.inbox.slice(-5).map((item) => item.summary).join(' / ')
+    const prompt = [
+      getSafeSharedPromptContext(session),
+      `You are evaluating whether ${agent.name} should speak next.`,
+      `Stance: ${agent.stance}`,
+      `Personality: ${agent.personality}`,
+      getSafeReasoningGuidance(agent.reasoningEffort),
+      `Recent transcript: ${transcript || 'No recent discussion yet.'}`,
+      inboxText ? `Direct inbox: ${inboxText}` : '',
+      'Return JSON only.',
+      '{"score":0-100,"confidence":0-100,"desiredAction":"agree|challenge|question|synthesize|implement","reason":"short reason"}'
+    ].filter(Boolean).join('\n\n')
+
+    const result = await this.runCli({
+      provider: agent.provider,
+      model: agent.model,
+      reasoningEffort: agent.reasoningEffort,
+      prompt,
+      sessionId: agent.runtimeSessionId ?? undefined
+    })
+
+    applyResultToAgent(agent, result)
+
+    const parsed = extractJson<{ score?: number; confidence?: number; desiredAction?: string; reason?: string }>(result.response)
+    return {
+      agentId: agent.id,
+      runtimeSessionId: agent.runtimeSessionId,
+      score: clamp(parsed?.score ?? 40, 0, 100),
+      confidence: clamp(parsed?.confidence ?? 50, 0, 100),
+      desiredAction: parsed?.desiredAction ?? 'question',
+      reason: parsed?.reason ?? 'Fallback score because the evaluation response was not structured.'
+    }
+  }
+
   private async scoreParticipant(session: MeetingSession, agent: RuntimeAgent): Promise<ScoreDecision> {
     const transcript = getRecentTranscript(session, 8)
     const inboxText = agent.inbox.slice(-5).map((item) => item.summary).join(' / ')
@@ -882,6 +1053,51 @@ export class MeetingOrchestrator {
       confidence: clamp(parsed?.confidence ?? 50, 0, 100),
       desiredAction: parsed?.desiredAction ?? 'question',
       reason: parsed?.reason ?? '発言必要度の理由が不足していたため既定値を使用'
+    }
+  }
+
+  private async moderateMeetingV2(session: MeetingSession, facilitator: RuntimeAgent): Promise<FacilitatorDecision> {
+    const transcript = getSafeRecentDialogue(session, 8, 180)
+    const participantState = session.agents
+      .filter((agent) => agent.role === 'Participant')
+      .map((agent) => `${agent.name}: speakCount=${agent.speakCount}, stance=${agent.stance}, personality=${agent.personality}`)
+      .join(' | ')
+
+    const prompt = [
+      getSafeSharedPromptContext(session),
+      `You are the facilitator ${facilitator.name}.`,
+      getSafeReasoningGuidance(facilitator.reasoningEffort),
+      `Participant state: ${participantState}`,
+      `Recent dialogue:\n${transcript}`,
+      'Decide who should speak next and whether multiple participants should respond in parallel.',
+      'Return JSON only.',
+      '{"overview":"current state","rationale":"why","nextFocus":"next focus","selectedAgentId":"agent-id or null","selectedAgentIds":["agent-id"],"inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false,"parallelDispatch":true|false}'
+    ].join('\n\n')
+
+    const result = await this.runCli({
+      provider: facilitator.provider,
+      model: facilitator.model,
+      reasoningEffort: facilitator.reasoningEffort,
+      prompt,
+      sessionId: facilitator.runtimeSessionId ?? undefined
+    })
+
+    applyResultToAgent(facilitator, result)
+
+    const parsed = extractJson<Partial<FacilitatorDecision>>(result.response)
+    const selectedAgentIds = Array.isArray(parsed?.selectedAgentIds) ? parsed.selectedAgentIds.filter(Boolean) : []
+    const inviteAgentIds = Array.isArray(parsed?.inviteAgentIds) ? parsed.inviteAgentIds.filter(Boolean) : []
+
+    return {
+      overview: parsed?.overview ?? 'Current state was not clearly returned.',
+      rationale: parsed?.rationale ?? 'No explicit rationale was returned.',
+      nextFocus: parsed?.nextFocus ?? 'Ask the next agent to move the discussion forward.',
+      selectedAgentId: parsed?.selectedAgentId ?? null,
+      selectedAgentIds,
+      inviteAgentIds,
+      interventionPriority: clamp(parsed?.interventionPriority ?? 40, 0, 100),
+      shouldIntervene: Boolean(parsed?.shouldIntervene),
+      parallelDispatch: Boolean(parsed?.parallelDispatch) || selectedAgentIds.length > 1
     }
   }
 
@@ -1011,6 +1227,66 @@ export class MeetingOrchestrator {
       speakers,
       dispatchReason: topReason
     }
+  }
+
+  private buildMeetingPromptV2(
+    session: MeetingSession,
+    speaker: RuntimeAgent,
+    facilitatorDecision: FacilitatorDecision | null,
+    scores: ScoreDecision[]
+  ): string {
+    const transcript = getSafeRecentDialogue(session, 8, 180)
+    const lastOtherMessage = getLastOtherMessage(session, speaker, 180)
+    const inboxText = getInboxPrompt(session, speaker, 4, 140)
+    const selfHistory = getSelfHistoryPrompt(session, speaker, 2, 180)
+
+    if (speaker.role === 'Facilitator') {
+      return [
+        getSafeSharedPromptContext(session),
+        `You are the facilitator ${speaker.name}.`,
+        getSafeReasoningGuidance(speaker.reasoningEffort),
+        `Current overview: ${facilitatorDecision?.overview ?? 'No prior overview.'}`,
+        `Next focus: ${facilitatorDecision?.nextFocus ?? 'Move the discussion to the next useful point.'}`,
+        selfHistory ? `Your own recent messages:\n${selfHistory}` : '',
+        `Recent dialogue:\n${transcript}`,
+        'Reply in Japanese with one short facilitation turn.',
+        'Summarize the current state, point to one or two concrete next angles, and explicitly invite the relevant participant names when useful.',
+        'Use 2 to 4 sentences. Do not output JSON or bullet lists.'
+      ].filter(Boolean).join('\n\n')
+    }
+
+    const scoreInfo = scores.find((entry) => entry.agentId === speaker.id)
+    return [
+      getSafeSharedPromptContext(session),
+      `You are ${speaker.name}. Your stance is "${speaker.stance}". Your personality is "${speaker.personality}".`,
+      getSafeReasoningGuidance(speaker.reasoningEffort),
+      selfHistory ? `Your own recent messages:\n${selfHistory}` : '',
+      lastOtherMessage ? `Most recent message from another agent:\n${lastOtherMessage}` : '',
+      `Recent dialogue:\n${transcript}`,
+      facilitatorDecision ? `Facilitator overview: ${facilitatorDecision.overview}\nNext focus: ${facilitatorDecision.nextFocus}` : '',
+      inboxText ? `Messages directly addressed to you:\n${inboxText}` : '',
+      scoreInfo
+        ? `Desired action: ${scoreInfo.desiredAction}\nScoring reason: ${scoreInfo.reason}\nGuidance: ${getSafeDesiredActionGuidance(scoreInfo.desiredAction)}`
+        : '',
+      'Reply in Japanese with one short conversational turn for the meeting.',
+      'React to a specific prior point, mention the target agent name explicitly when responding to someone, and add one concrete refinement, concern, question, or synthesis.',
+      'Use 2 to 4 sentences. Do not output JSON or bullet lists.'
+    ].filter(Boolean).join('\n\n')
+  }
+
+  private buildFinalConclusionPromptV2(session: MeetingSession): string {
+    const transcript = getRecentTranscript(session, 20)
+    return [
+      getSafeSharedPromptContext(session),
+      'Summarize the discussion in Japanese.',
+      'Create exactly four numbered sections with these titles:',
+      '1. 結論サマリー',
+      '2. 共通認識',
+      '3. 残課題',
+      '4. 次のアクション',
+      'Write each section as plain paragraphs, not bullets unless necessary.',
+      `Discussion log: ${transcript}`
+    ].join('\n\n')
   }
 
   private buildMeetingPrompt(

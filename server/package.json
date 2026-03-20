@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon --watch . --ext ts --exec \"ts-node index.ts\"",
+    "dev": "powershell -ExecutionPolicy Bypass -File ./start-dev.ps1",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

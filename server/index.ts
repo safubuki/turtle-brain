@@ -1,7 +1,7 @@
 import cors from 'cors'
 import dotenv from 'dotenv'
 import express from 'express'
-import { runCli, type AgentCliProvider, type ReasoningEffort } from './cliRunner'
+import { hasCopilotSdkRuntime, runCli, type AgentCliProvider, type ReasoningEffort } from './cliRunner'
 import { loadInputContext } from './contextLoader'
 import { pickFilesDialog, pickFolderDialog } from './nativeDialog'
 import { MeetingOrchestrator, type RunTurnRequest } from './orchestrator'
@@ -11,12 +11,22 @@ dotenv.config()
 
 const app = express()
 const port = process.env.PORT || 3001
+const serverStartedAt = new Date().toISOString()
+const backendFeatureMarker = 'copilot-sdk-bridge-v3'
 
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', message: 'Turtle Brain Backend is running' })
+  res.json({
+    status: 'ok',
+    message: 'Turtle Brain Backend is running',
+    startedAt: serverStartedAt,
+    featureMarker: backendFeatureMarker,
+    features: {
+      copilotSdkBridge: hasCopilotSdkRuntime()
+    }
+  })
 })
 
 const orchestrator = new MeetingOrchestrator(runCli)

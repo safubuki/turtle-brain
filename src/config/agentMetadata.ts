@@ -11,27 +11,49 @@ export const ROLE_LABELS: Record<AgentRole, string> = {
   Facilitator: 'ファシリテータ'
 }
 
-export const STANCE_PRESETS = [
-  '技術推進',
+export const STANCE_PRIMARY_OPTIONS = [
+  '建設的・共感的',
+  '探究的・批判的',
+  '中立・バランス',
+  '発散・アイデア重視',
+  '実務・実装重視',
   '品質・リスク管理',
   'ユーザー価値重視',
-  'コスト最適化',
-  '実装速度重視',
-  '運用安定性重視',
+  '長期・戦略視点'
+] as const
+
+export const PERSONALITY_PRIMARY_OPTIONS = [
+  '前向き・協調的',
+  '慎重・論理的',
+  '高速・実務的',
+  '丁寧・堅実',
+  '分析的・俯瞰的',
+  '率直・情熱的',
+  '冷静・寡黙',
+  '大胆・直感的'
+] as const
+
+export const STANCE_PRESETS = [
+  '建設的',
+  '批判的',
+  '中立',
+  'アイデア出し',
+  'リスク分析',
+  '受容的',
+  '同調的',
+  '挑戦的',
+  'データ重視',
+  '実践派',
+  'ユーザー目線',
+  '長期視点',
+  'コスト重視',
+  '速度重視',
+  '品質重視',
+  '新規性重視',
+  '保守性重視',
+  '運用重視',
   'セキュリティ重視',
-  'データ・分析重視',
-  'ビジネス成果重視',
-  '現場実装目線',
-  '中立・バランス',
-  '長期保守重視',
-  '拡張性重視',
-  '標準化・整備',
-  '革新・実験志向',
-  'シンプル化重視',
-  '顧客体験重視',
-  'チーム生産性重視',
-  '法令・監査対応',
-  'プロダクト戦略重視'
+  '合意形成重視'
 ] as const
 
 export const PERSONALITY_PRESETS = [
@@ -48,13 +70,13 @@ export const PERSONALITY_PRESETS = [
   '寡黙',
   '饒舌',
   '皮肉屋',
-  '情熱的',
+  '俯瞰的',
   '丁寧',
-  '厳格',
-  '柔軟',
-  '主体的',
+  '堅実',
+  '率直',
   '実務的',
-  '批判的'
+  '主張強め',
+  'ユーモラス'
 ] as const
 
 export const REASONING_OPTIONS: Array<{
@@ -62,10 +84,10 @@ export const REASONING_OPTIONS: Array<{
   label: string
   description: string
 }> = [
-  { value: 'low', label: 'Low', description: '軽めに推論して素早く返答' },
+  { value: 'low', label: 'Low', description: '短めに推論して速度重視' },
   { value: 'medium', label: 'Medium', description: '標準的な推論強度' },
-  { value: 'high', label: 'High', description: '深めに考えて回答品質を重視' },
-  { value: 'xhigh', label: 'XHigh', description: '最も強い推論で複雑な課題向け' }
+  { value: 'high', label: 'High', description: '深めに考えて妥当性を重視' },
+  { value: 'xhigh', label: 'XHigh', description: '最大級の推論で複雑な議題向け' }
 ]
 
 export function formatAgentRole(role: AgentRole): string {
@@ -80,23 +102,55 @@ export function parseSelectableValue(value: string): string[] {
   return Array.from(
     new Set(
       value
-        .split(/\s*\/\s*|\s*・\s*|[,+、\n]+/u)
+        .split(/\s*\/\s*|\s*・\s*|[,+，\n]+/u)
         .map((entry) => entry.trim())
         .filter(Boolean)
     )
   )
 }
 
-export function serializeSelectableValue(values: string[]): string {
-  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).join(' / ')
+export function serializeSelectableValue(values: string[], delimiter = '・'): string {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).join(delimiter)
 }
 
 export function toggleSelectableValue(currentValue: string, target: string): string {
   const selections = parseSelectableValue(currentValue)
-
   if (selections.includes(target)) {
     return serializeSelectableValue(selections.filter((value) => value !== target))
   }
-
   return serializeSelectableValue([...selections, target])
+}
+
+export function appendSelectableValue(currentValue: string, extraValue: string): string {
+  return serializeSelectableValue([...parseSelectableValue(currentValue), ...parseSelectableValue(extraValue)])
+}
+
+export function setPrimarySelectableValue(currentValue: string, primaryValue: string): string {
+  const primaryParts = parseSelectableValue(primaryValue)
+  const rest = parseSelectableValue(currentValue).filter((value) => !primaryParts.includes(value))
+  return serializeSelectableValue([...primaryParts, ...rest])
+}
+
+export function getPrimarySelectableValue(currentValue: string, options: readonly string[]): string {
+  const currentParts = parseSelectableValue(currentValue)
+  if (currentParts.length === 0) {
+    return options[0] ?? ''
+  }
+
+  const matched = [...options]
+    .sort((left, right) => parseSelectableValue(right).length - parseSelectableValue(left).length)
+    .find((option) => {
+      const optionParts = parseSelectableValue(option)
+      return optionParts.every((part, index) => currentParts[index] === part)
+    })
+
+  return matched ?? currentParts[0]
+}
+
+export function ensurePrimaryOption(options: readonly string[], currentValue: string): string[] {
+  const normalized = currentValue.trim()
+  if (!normalized || options.includes(normalized)) {
+    return [...options]
+  }
+  return [normalized, ...options]
 }

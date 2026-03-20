@@ -350,19 +350,19 @@ function createAgent(
 const conversationDefaultAgents: AgentProfile[] = [
   createAgent({
     id: 'agent-1',
-    name: '技術担当',
+    name: 'エージェントA',
     role: 'Participant',
-    stance: '新規性重視 / ユーザー価値重視',
-    personality: '率直・論理的 / 高速・実務的',
+    stance: '発散・アイデア重視',
+    personality: '率直・論理的',
     provider: 'codex',
     model: 'gpt-5.4'
   }),
   createAgent({
     id: 'agent-2',
-    name: '品質担当',
+    name: 'エージェントB',
     role: 'Participant',
-    stance: '批判的検証 / 品質・リスク管理',
-    personality: '丁寧・堅実 / 慎重・分析的',
+    stance: '探究的・批判的',
+    personality: '丁寧・堅実',
     provider: 'copilot',
     model: 'gpt-5.2'
   })
@@ -371,28 +371,28 @@ const conversationDefaultAgents: AgentProfile[] = [
 const meetingDefaultAgents: AgentProfile[] = [
   createAgent({
     id: 'agent-1',
-    name: '技術担当',
+    name: 'エージェントA',
     role: 'Participant',
-    stance: '新規性重視 / コスト最適化',
-    personality: '高速・実務的 / 大胆・発想型',
+    stance: '発散・アイデア重視',
+    personality: '率直・論理的',
     provider: 'codex',
     model: 'gpt-5.4'
   }),
   createAgent({
     id: 'agent-2',
-    name: '品質担当',
+    name: 'エージェントB',
     role: 'Participant',
-    stance: '品質・リスク管理 / 長期運用重視',
-    personality: '丁寧・堅実 / 慎重・分析的',
+    stance: '品質・リスク管理',
+    personality: '慎重・分析的',
     provider: 'copilot',
     model: 'gpt-5.2'
   }),
   createAgent({
     id: 'agent-3',
-    name: 'ユーザー担当',
+    name: 'エージェントC',
     role: 'Participant',
-    stance: 'ユーザー価値重視 / 中立・バランス',
-    personality: 'フレンドリー / 率直・論理的',
+    stance: 'ユーザー価値重視',
+    personality: '前向き・協調的',
     provider: 'gemini',
     model: 'gemini-2.5-flash'
   }),
@@ -400,8 +400,8 @@ const meetingDefaultAgents: AgentProfile[] = [
     id: 'moderator',
     name: 'ファシリテータ',
     role: 'Facilitator',
-    stance: '進行管理 / 中立・バランス',
-    personality: '丁寧・堅実 / フレンドリー',
+    stance: '中立・バランス',
+    personality: '丁寧・俯瞰的',
     provider: 'codex',
     model: 'gpt-5.4'
   })
@@ -440,7 +440,41 @@ function getDiscussionStyleDefaults(style: DiscussionStyle): {
   }
 }
 
+const REQUIRED_BACKEND_FEATURE_MARKER = 'copilot-sdk-bridge-v3'
+
+interface BackendHealthResponse {
+  status?: string
+  featureMarker?: string
+  features?: {
+    copilotSdkBridge?: boolean
+  }
+}
+
+async function ensureCopilotBackendReady(agents: AgentProfile[]): Promise<void> {
+  if (!agents.some((agent) => agent.provider === 'copilot')) {
+    return
+  }
+
+  const health = await apiRequestJson<BackendHealthResponse>('/api/health')
+  if (health.features?.copilotSdkBridge === true && health.featureMarker === REQUIRED_BACKEND_FEATURE_MARKER) {
+    return
+  }
+
+  throw new Error('COPILOT_BACKEND_OUTDATED')
+}
+
 function getAgentInteractionErrorMessage(error: unknown, details?: string): string {
+  if (details && /COPILOT_BACKEND_OUTDATED/i.test(details)) {
+    return 'GitHub Copilot CLI の継続会話には新しいバックエンドが必要です。現在は古い server が 3001 番ポートに残っている可能性があります。server を再起動してください。'
+  }
+
+  if (error instanceof Error && /COPILOT_BACKEND_OUTDATED/i.test(error.message)) {
+    return 'GitHub Copilot CLI の継続会話には新しいバックエンドが必要です。現在は古い server が 3001 番ポートに残っている可能性があります。server を再起動してください。'
+  }
+
+  if (error instanceof Error && /GitHub Copilot SDK runtime is not available/i.test(error.message)) {
+    return 'GitHub Copilot SDK が見つからないため、継続会話モードを開始できませんでした。グローバルの Copilot CLI / SDK が見える状態で server を再起動してください。'
+  }
   if (details) {
     return `エージェント処理に失敗しました: ${details}`
   }
@@ -449,9 +483,17 @@ function getAgentInteractionErrorMessage(error: unknown, details?: string): stri
     return 'バックエンドへ接続できませんでした。サーバーが起動しているか確認してください。'
   }
 
+  if (error instanceof Error && /ENAMETOOLONG/i.test(error.message)) {
+    return 'GitHub Copilot CLI の実行が古い引数経路に落ちています。新しい SDK 継続経路が使われていないため、古い server が残っている可能性があります。server を再起動してください。'
+  }
+
+  if (error instanceof Error && /ENAMETOOLONG/i.test(error.message)) {
+    return 'エージェント処理に失敗しました: CLI の起動引数が長すぎます。Copilot SDK の継続セッション経路が使えていない可能性があります。server を再起動し、それでも続く場合はバックエンドが旧経路のまま動いていないか確認してください。'
+  }
+
   if (error instanceof Error && error.message) {
     if (/ENAMETOOLONG/i.test(error.message)) {
-      return 'エージェント処理に失敗しました: コマンド引数が長すぎます。古いバックエンドが動いたままの可能性が高いので、サーバーを再起動してください。今回の修正以降は server 側も自動再起動されます。'
+      return 'エージェント処理に失敗しました: CLI の起動引数が長すぎます。Copilot の継続実行経路を調整しているため、サーバー再起動後に新規セッションで再試行してください。'
     }
 
     return `エージェント処理に失敗しました: ${error.message}`
@@ -469,6 +511,29 @@ function sanitizeAgents(agents: AgentProfile[]): AgentProfile[] {
     speakCount: 0,
     handRaiseIntensity: 0
   }))
+}
+
+function reconcileAgentsWithCatalogs(agents: AgentProfile[], catalogs: ProviderCatalogMap): AgentProfile[] {
+  return agents.map((agent) => {
+    const providerCatalog = catalogs[agent.provider]
+    const models = providerCatalog?.models ?? []
+    const matchedModel = models.find((model) => model.id === agent.model)
+    const resolvedModel = matchedModel?.id ?? models[0]?.id ?? agent.model
+    const supportedReasoning = (matchedModel ?? models[0])?.supportedReasoningEfforts ?? []
+
+    const reasoningEffort =
+      supportedReasoning.length === 0
+        ? agent.reasoningEffort
+        : supportedReasoning.includes(agent.reasoningEffort)
+          ? agent.reasoningEffort
+          : (matchedModel ?? models[0])?.defaultReasoningEffort ?? supportedReasoning[0] ?? agent.reasoningEffort
+
+    return {
+      ...agent,
+      model: resolvedModel,
+      reasoningEffort
+    }
+  })
 }
 
 function normalizeCatalog(raw: ProviderCatalog, fallback: ProviderCatalog): ProviderCatalog {
@@ -617,6 +682,9 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         providerCatalogStatus: 'ready',
         providerCatalogError: null
       })
+      set((state) => ({
+        agents: reconcileAgentsWithCatalogs(state.agents, mergedCatalogs)
+      }))
     } catch (error) {
       set((state) => ({
         providerCatalogStatus: 'error',
@@ -665,6 +733,8 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
     }
 
     try {
+      await ensureCopilotBackendReady(state.agents)
+
       const data = await apiRequestJson<{
         success?: boolean
         sessionId: string | null

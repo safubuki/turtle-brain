@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import { AgentRuntimeMeta } from './components/AgentRuntimeMeta'
 import { SettingsModal } from './components/SettingsModal'
-import { formatAgentRole } from './config/agentMetadata'
+import { PROVIDER_LABELS, formatAgentRole } from './config/agentMetadata'
 import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from './config/modeMetadata'
 import { apiRequestJson } from './lib/apiClient'
 import { useStore, type AgentProfile, type Message } from './store/useStore'
@@ -131,23 +131,45 @@ function parseConclusionSections(content: string): ConclusionSection[] {
     return []
   }
 
-  const blocks = normalized.match(/\d+\.\s[\s\S]*?(?=\n\d+\.\s|$)/g)
-  if (!blocks || blocks.length === 0) {
-    return [{ title: '結論', lines: splitReadableLines(normalized) }]
+  const sections: ConclusionSection[] = []
+  let currentTitle: string | null = null
+  let currentLines: string[] = []
+
+  const flushSection = () => {
+    if (!currentTitle) {
+      return
+    }
+
+    const body = currentLines.join('\n').trim()
+    const lines = splitReadableLines(body)
+    sections.push({
+      title: currentTitle,
+      lines: lines.length > 0 ? lines : ['内容なし']
+    })
   }
 
-  return blocks.map((block) => {
-    const [firstLine, ...rest] = block.split('\n')
-    const inlineMatch = firstLine.match(/^(\d+\.\s[^:：]+)[:：]?\s*(.*)$/)
-    const title = inlineMatch?.[1]?.trim() ?? firstLine.trim()
-    const body = [inlineMatch?.[2] ?? '', ...rest].join('\n').trim()
-    const lines = splitReadableLines(body)
+  normalized.split('\n').forEach((rawLine) => {
+    const line = rawLine.trim()
+    const headingSource = line.replace(/^\*\*|\*\*$/g, '').trim()
+    const headingMatch = headingSource.match(/^(\d+\.\s+.+?)(?:\s*[:：]\s*(.*))?$/)
 
-    return {
-      title,
-      lines: lines.length > 0 ? lines : ['内容なし']
+    if (headingMatch) {
+      flushSection()
+      currentTitle = headingMatch[1].trim()
+      currentLines = headingMatch[2] ? [headingMatch[2].trim()] : []
+      return
     }
+
+    currentLines.push(rawLine)
   })
+
+  flushSection()
+
+  if (sections.length > 0) {
+    return sections
+  }
+
+  return [{ title: '結論', lines: splitReadableLines(normalized) }]
 }
 
 function getAgentAliases(agent: AgentProfile): string[] {
@@ -195,9 +217,10 @@ function findReferencedMessages(
     }
 
     const localOrder = previousMessages.filter((message) => message.agentId === agent.id).length
+    const globalOrder = allMessages.findIndex((message) => message.id === targetMessage.id) + 1
     references.push({
       messageId: targetMessage.id,
-      label: `${agent.name} ${localOrder}件目`,
+      label: `${agent.name} ${localOrder}件目 / 全体${globalOrder}件目`,
       summary: buildDigestFromContent(targetMessage.content)
     })
   }
@@ -386,33 +409,44 @@ function App() {
     const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     const sessionTopic = topic || localTopic || 'untitled-session'
 
-    let md = '# Turtle Brain 議論ログ\n\n'
+    let md = '# Turtle Brain 議事録\n\n'
+    md += '## セッション概要\n\n'
     md += `- テーマ: ${sessionTopic}\n`
     md += `- 日付: ${dateStr}\n`
     md += `- 議論スタイル: ${discussionStyleInfo.label}\n`
     md += `- 実行モード: ${executionModeInfo.label}\n`
 
     if (inputPaths.length > 0) {
-      md += '- 入力パス:\n'
+      md += '- 入力ファイル / フォルダ:\n'
       inputPaths.forEach((filePath) => {
         md += `  - ${filePath}\n`
       })
     }
 
-    md += '\n## エージェント設定\n\n'
+    md += '\n## 参加エージェント\n\n'
     agents.forEach((agent) => {
       md += `### ${agent.name}\n`
-      md += `- Role: ${formatAgentRole(agent.role)}\n`
-      md += `- Stance: ${agent.stance}\n`
-      md += `- Personality: ${agent.personality}\n`
-      md += `- CLI: ${agent.provider}\n`
-      md += `- Model: ${agent.model}\n`
+      md += `- ロール: ${formatAgentRole(agent.role)}\n`
+      md += `- スタンス: ${agent.stance}\n`
+      md += `- 性格: ${agent.personality}\n`
+      md += `- CLI: ${PROVIDER_LABELS[agent.provider]}\n`
+      md += `- モデル: ${agent.model}\n`
       md += `- Reasoning: ${agent.reasoningEffort}\n\n`
     })
 
     if (finalConclusion) {
       md += '## 最終結論\n\n'
-      md += `${finalConclusion}\n\n`
+      if (conclusionSections.length > 0) {
+        conclusionSections.forEach((section) => {
+          md += `### ${section.title}\n`
+          section.lines.forEach((line) => {
+            md += `${line}\n`
+          })
+          md += '\n'
+        })
+      } else {
+        md += `${finalConclusion}\n\n`
+      }
     }
 
     md += '## 発言ログ\n\n'
@@ -422,7 +456,7 @@ function App() {
       md += `${getRenderableMessageContent(message.content)}\n\n`
     })
 
-    md += '## 最新サマリー\n\n'
+    md += '## エージェント別現在の主張\n\n'
     agents.forEach((agent) => {
       const agentMessages = orderedMessages.filter((message) => message.agentId === agent.id)
       const latest = agentMessages[agentMessages.length - 1]
@@ -666,14 +700,14 @@ function App() {
                       <User size={16} />
                     </div>
 
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 flex-1" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                       <p className="truncate text-sm font-semibold text-slate-100">{agent.name}</p>
                       <p className="text-xs text-slate-400">{formatAgentRole(agent.role)}</p>
                       <p className="mt-2 text-xs text-slate-300">スタンス: {agent.stance}</p>
                       <p className="mt-1 text-xs text-slate-300">性格: {agent.personality}</p>
-                      <div className="mt-3">
-                        <AgentRuntimeMeta agent={agent} compact />
-                      </div>
+                      <p className="mt-2 text-xs text-slate-500">
+                        {agent.provider === 'codex' ? 'Codex CLI' : agent.provider === 'gemini' ? 'Gemini CLI' : 'GitHub Copilot CLI'} / {agent.model}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -818,7 +852,7 @@ function App() {
           </div>
         </header>
 
-        <div className="relative z-10 flex flex-1 flex-col gap-5 overflow-hidden p-6">
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-6">
           {sessionStatus === 'idle' && messages.length === 0 ? (
             <div className="flex flex-1 items-center justify-center rounded-2xl border-2 border-dashed border-slate-700/50 bg-slate-800/30">
               <div className="space-y-4 text-center">
@@ -834,7 +868,7 @@ function App() {
               </div>
             </div>
           ) : (
-            <div className="flex flex-1 gap-4 overflow-x-auto overflow-y-hidden pb-2">
+            <div className="flex items-stretch justify-start gap-6 overflow-x-auto overflow-y-visible pb-2 pr-2">
               {agents.map((agent) => {
                 const tone = getAgentPanelTone(agent)
                 const statusBadge = getStatusBadge(agent)
@@ -844,7 +878,7 @@ function App() {
                 return (
                   <section
                     key={agent.id}
-                    className={`glass-panel flex h-full min-w-[320px] max-w-[420px] flex-1 shrink-0 flex-col rounded-2xl border ${tone.card}`}
+                    className={`glass-panel flex min-w-[420px] max-w-[520px] basis-[460px] shrink-0 flex-col self-stretch rounded-2xl border min-h-[640px] min-w-0 ${tone.card}`}
                   >
                     <div className={`border-b border-slate-700/50 p-4 ${tone.header}`}>
                       <div className="flex items-start justify-between gap-3">
@@ -869,13 +903,35 @@ function App() {
                       </div>
 
                       <div className="mt-4 grid grid-cols-2 gap-2">
-                        <div className="rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-2">
+                        <div className="flex min-h-[92px] min-w-0 flex-col rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-2">
                           <p className="text-[11px] uppercase tracking-wider text-slate-500">スタンス</p>
-                          <p className="mt-1 text-sm text-slate-200">{agent.stance}</p>
+                          <p
+                            className="mt-1 overflow-hidden break-words text-sm leading-6 text-slate-200"
+                          style={{
+                            display: '-webkit-box',
+                            WebkitLineClamp: 3,
+                            WebkitBoxOrient: 'vertical',
+                            overflowWrap: 'anywhere',
+                            wordBreak: 'break-word'
+                          }}
+                          >
+                            {agent.stance}
+                          </p>
                         </div>
-                        <div className="rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-2">
+                        <div className="flex min-h-[92px] min-w-0 flex-col rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-2">
                           <p className="text-[11px] uppercase tracking-wider text-slate-500">性格</p>
-                          <p className="mt-1 text-sm text-slate-200">{agent.personality}</p>
+                          <p
+                            className="mt-1 overflow-hidden break-words text-sm leading-6 text-slate-200"
+                          style={{
+                            display: '-webkit-box',
+                            WebkitLineClamp: 3,
+                            WebkitBoxOrient: 'vertical',
+                            overflowWrap: 'anywhere',
+                            wordBreak: 'break-word'
+                          }}
+                          >
+                            {agent.personality}
+                          </p>
                         </div>
                       </div>
 
@@ -883,7 +939,7 @@ function App() {
                         <AgentRuntimeMeta agent={agent} compact />
                       </div>
 
-                      <div className="mt-4 rounded-lg border border-slate-700/50 bg-slate-900/30 px-3 py-2">
+                      <div className="mt-3 rounded-lg border border-slate-700/50 bg-slate-900/30 px-3 py-2">
                         <div className="mb-1 flex items-center justify-between text-xs">
                           <span className="text-slate-400">挙手強度</span>
                           <span className="font-mono text-slate-200">{agent.handRaiseIntensity}</span>
@@ -899,7 +955,7 @@ function App() {
 
                     <div className="border-b border-slate-700/40 bg-gradient-to-r from-cyan-900/20 to-blue-900/20 px-4 py-3">
                       <div className="flex items-center justify-between gap-3">
-                        <p className={`text-xs font-semibold uppercase tracking-wider ${tone.accentText}`}>最新サマリー</p>
+                        <p className={`text-xs font-semibold uppercase tracking-wider ${tone.accentText}`}>現在の主張</p>
                         <button
                           onClick={() => latestMessage && setSummaryModal({ agentName: agent.name, content: latestMessage.content })}
                           disabled={!latestMessage}
@@ -911,16 +967,28 @@ function App() {
                           </span>
                         </button>
                       </div>
-                      <div className="mt-3 h-56 overflow-y-auto rounded-xl border border-slate-700/50 bg-slate-950/20 p-3">
-                        <p className="whitespace-pre-wrap text-sm leading-7 text-slate-200">
-                          {latestMessage ? getRenderableMessageContent(latestMessage.content) : 'まだ発言はありません。'}
+                      <div className="mt-3 h-[104px] overflow-hidden rounded-xl border border-slate-700/50 bg-slate-950/20 p-3">
+                        <p
+                          className="break-words text-sm leading-7 text-slate-200"
+                          style={{
+                            display: '-webkit-box',
+                            WebkitLineClamp: 3,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                            overflowWrap: 'anywhere',
+                            wordBreak: 'break-word'
+                          }}
+                        >
+                          {latestMessage
+                            ? buildDigestFromContent(latestMessage.content)
+                            : 'まだ発言はありません。議論が始まるとここに現在の主張が表示されます。'}
                         </p>
                       </div>
                     </div>
 
                     <div className="border-b border-slate-700/40 bg-slate-900/20 px-4 py-2.5">
                       <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-semibold text-slate-300">発言ジャンプ</p>
+                        <p className="text-sm font-semibold text-slate-300">発言履歴</p>
                         {agentMessages.length > 0 ? (
                           <div className="flex flex-wrap justify-end gap-1.5">
                             {agentMessages.map((message, index) => (
@@ -939,7 +1007,7 @@ function App() {
                       </div>
                     </div>
 
-                    <div className="flex-1 space-y-3 overflow-y-auto p-3">
+                    <div className="flex flex-1 flex-col gap-3 p-3">
                       {agentMessages.length === 0 ? (
                         <div className="rounded-xl border border-dashed border-slate-700/50 p-4 text-sm text-slate-500">
                           このエージェントの発言はまだありません。
@@ -955,7 +1023,7 @@ function App() {
                           )
 
                           return (
-                            <article id={`message-${message.id}`} key={message.id} className={`rounded-xl border p-3 ${tone.message}`}>
+                            <article id={`message-${message.id}`} key={message.id} className={`min-w-0 overflow-hidden rounded-xl border p-3 ${tone.message}`}>
                               <div className="mb-2 flex items-center justify-between gap-3">
                                 <p className={`text-sm font-semibold ${tone.accentText}`}>
                                   {agent.role === 'Facilitator' ? `${index + 1}件目の進行` : `${index + 1}件目の発言`}
@@ -966,7 +1034,10 @@ function App() {
                                 </div>
                               </div>
 
-                              <p className="whitespace-pre-wrap text-sm leading-7 text-slate-200">
+                              <p
+                                className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-200"
+                                style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                              >
                                 {getRenderableMessageContent(message.content)}
                               </p>
 
@@ -999,7 +1070,7 @@ function App() {
           )}
 
           {finalConclusion && (
-            <section className="glass-panel mb-1 max-h-96 shrink-0 overflow-y-auto rounded-2xl border-t-4 border-cyan-500 bg-slate-800/80 p-6 shadow-2xl shadow-cyan-900/20">
+            <section className="glass-panel mb-1 max-h-[68vh] min-h-[520px] shrink-0 overflow-y-auto rounded-2xl border-t-4 border-cyan-500 bg-slate-800/80 p-6 shadow-2xl shadow-cyan-900/20">
               <div className="mb-4 flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
                   <div className="rounded-xl bg-cyan-500/15 p-2 text-cyan-400">
@@ -1016,17 +1087,20 @@ function App() {
                   className="flex items-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-medium text-cyan-300 transition-colors hover:bg-cyan-500/20"
                 >
                   <Download size={16} />
-                  Markdown を保存
+                  MDダウンロード
                 </button>
               </div>
 
-              <div className="space-y-4">
+              <div className="space-y-5">
                 {conclusionSections.map((section) => (
-                  <section key={section.title} className="rounded-xl border border-slate-700/40 bg-slate-900/20 p-4">
+                  <section
+                    key={section.title}
+                    className="rounded-2xl border border-slate-700/50 bg-slate-900/30 p-5 shadow-lg shadow-slate-950/20"
+                  >
                     <h4 className="text-lg font-semibold text-slate-100">{section.title}</h4>
                     <div className="mt-3 space-y-2">
                       {section.lines.map((line, index) => (
-                        <p key={`${section.title}-${index}`} className="text-sm leading-7 text-slate-200">
+                        <p key={`${section.title}-${index}`} className="text-base leading-7 text-slate-200">
                           {line}
                         </p>
                       ))}
