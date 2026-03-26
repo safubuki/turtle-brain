@@ -48,8 +48,26 @@ interface SelectionPanelProps {
   onCustomCommit: () => void
 }
 
-function createNewAgent(index: number): AgentProfile {
+const ALL_PROVIDERS = Object.keys(PROVIDER_LABELS) as AgentProfile['provider'][]
+
+function getProviderFallbackModel(provider: AgentProfile['provider']): string {
+  switch (provider) {
+    case 'gemini':
+      return 'gemini-2.5-flash'
+    case 'copilot':
+      return 'gpt-5.2'
+    default:
+      return 'gpt-5.4'
+  }
+}
+
+function createNewAgent(
+  index: number,
+  provider: AgentProfile['provider'] = 'codex',
+  catalog?: ProviderCatalog
+): AgentProfile {
   const nextLetter = String.fromCharCode(64 + Math.min(index, 26))
+  const model = getProviderInitialModel(catalog, getProviderFallbackModel(provider))
   return {
     id: `agent-${Date.now()}`,
     name: `エージェント${nextLetter}`,
@@ -59,9 +77,9 @@ function createNewAgent(index: number): AgentProfile {
     avatarPreset: getDefaultBuiltInAgentIcon(Math.max(0, index - 1)),
     avatarCustomDataUrl: null,
     avatarCustomName: null,
-    provider: 'codex',
-    model: 'gpt-5.4',
-    reasoningEffort: 'medium',
+    provider,
+    model,
+    reasoningEffort: getNextReasoningEffort(model, 'medium', catalog),
     runtimeSessionId: null,
     rateLimits: null,
     status: 'idle',
@@ -239,8 +257,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     clearSavedSettings,
     turnLimit,
     setTurnLimit,
-    handRaiseMode,
-    setHandRaiseMode,
     environment,
     executionMode,
     setExecutionMode,
@@ -309,6 +325,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const isConversationMode = discussionStyle === 'conversation'
   const executionModeInfo = EXECUTION_MODE_METADATA[executionMode]
   const discussionStyleInfo = DISCUSSION_STYLE_METADATA[discussionStyle]
+  const isProviderSelectionReady = providerCatalogStatus === 'ready'
+  const availableProviders = isProviderSelectionReady
+    ? ALL_PROVIDERS.filter((provider) => providerCatalogs[provider]?.available)
+    : []
   const getCustomKey = (agentId: string, field: 'stance' | 'personality') => `${agentId}:${field}`
   const setCustomValue = (agentId: string, field: 'stance' | 'personality', value: string) => {
     setCustomInputs((current) => ({ ...current, [getCustomKey(agentId, field)]: value }))
@@ -589,34 +609,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               </div>
             </div>
 
-            {!isConversationMode && (
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setHandRaiseMode('rule-based')}
-                  className={`rounded-xl border px-4 py-3 text-left transition-all ${
-                    handRaiseMode === 'rule-based'
-                      ? 'border-cyan-500/50 bg-cyan-500/20 text-cyan-300'
-                      : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
-                  }`}
-                >
-                  <p className="font-semibold">Rule-based</p>
-                  <p className="mt-1 text-xs opacity-80">ルールベースで発言者を決定します。</p>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setHandRaiseMode('ai-evaluation')}
-                  className={`rounded-xl border px-4 py-3 text-left transition-all ${
-                    handRaiseMode === 'ai-evaluation'
-                      ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
-                      : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
-                  }`}
-                >
-                  <p className="font-semibold">AI Evaluation</p>
-                  <p className="mt-1 text-xs opacity-80">AI が文脈を見て発言者を決定します。</p>
-                </button>
-              </div>
-            )}
           </section>
 
           <section className="space-y-4">
@@ -639,7 +631,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 {!isConversationMode && (
                   <button
                     type="button"
-                    onClick={() => addAgent(createNewAgent(agents.length + 1))}
+                    onClick={() => {
+                      const provider = availableProviders[0] ?? 'codex'
+                      addAgent(createNewAgent(agents.length + 1, provider, providerCatalogs[provider]))
+                    }}
                     disabled={agents.length >= 6}
                     className="flex items-center gap-1.5 rounded-lg bg-cyan-500/20 px-3 py-1.5 text-sm font-medium text-cyan-300 transition-colors hover:bg-cyan-500/30 disabled:opacity-50"
                   >
@@ -654,6 +649,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               {agents.map((agent) => {
                 const isFacilitator = agent.role === 'Facilitator'
                 const providerCatalog = providerCatalogs[agent.provider]
+                const isCurrentProviderInstalled = providerCatalog?.available ?? false
+                const providerSelectDisabled = !isProviderSelectionReady || availableProviders.length === 0
                 const modelOptions = providerCatalog?.models ?? []
                 const fallbackModelOption =
                   modelOptions.length === 0 && agent.model
@@ -937,6 +934,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           onChange={(event) => {
                             const provider = event.target.value as AgentProfile['provider']
                             const nextCatalog = providerCatalogs[provider]
+                            if (!nextCatalog?.available) {
+                              return
+                            }
                             const nextModel = getProviderInitialModel(nextCatalog, agent.model)
                             updateAgent(agent.id, {
                               provider,
@@ -944,14 +944,30 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                               reasoningEffort: getNextReasoningEffort(nextModel, agent.reasoningEffort, nextCatalog)
                             })
                           }}
+                          disabled={providerSelectDisabled}
                           className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
                         >
-                          {Object.entries(PROVIDER_LABELS).map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
+                          {ALL_PROVIDERS.map((provider) => {
+                            const catalog = providerCatalogs[provider]
+                            const isAvailable = catalog?.available ?? false
+                            return (
+                              <option
+                                key={provider}
+                                value={provider}
+                                disabled={isProviderSelectionReady ? !isAvailable : provider !== agent.provider}
+                              >
+                                {isAvailable ? PROVIDER_LABELS[provider] : `${PROVIDER_LABELS[provider]} (未インストール)`}
+                              </option>
+                            )
+                          })}
                         </select>
+                        <p className={`text-xs ${isCurrentProviderInstalled ? 'text-slate-500' : 'text-rose-300'}`}>
+                          {!isProviderSelectionReady
+                            ? 'CLI 状態を確認中です。確認完了まで切り替えを保留しています。'
+                            : isCurrentProviderInstalled
+                              ? 'インストール済み CLI のみ選択できます。'
+                              : '現在の CLI は未インストールです。インストール済み CLI に切り替えてください。'}
+                        </p>
                       </div>
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium text-slate-400">Model</label>

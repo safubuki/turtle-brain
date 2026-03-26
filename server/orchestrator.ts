@@ -10,6 +10,7 @@ import type {
 
 export type AgentRole = 'Participant' | 'Facilitator'
 export type DiscussionStyle = 'conversation' | 'meeting'
+export type HandRaiseMode = 'rule-based' | 'ai-evaluation'
 export type AgentAvatarPreset = 'user_icon1' | 'user_icon2' | 'user_icon3' | 'user_icon4'
 
 export interface AgentProfileInput {
@@ -92,6 +93,7 @@ export interface RunTurnRequest {
   topic: string
   inputPaths?: string[]
   discussionStyle: DiscussionStyle
+  handRaiseMode?: HandRaiseMode
   turnLimit: number
   agents: AgentProfileInput[]
 }
@@ -130,6 +132,13 @@ interface FacilitatorDecision {
   interventionPriority: number
   shouldIntervene: boolean
   parallelDispatch: boolean
+  participantScores: Array<{
+    agentId: string
+    score: number
+    confidence: number
+    desiredAction: string
+    reason: string
+  }>
 }
 
 interface ScoreDecision {
@@ -148,6 +157,7 @@ interface MeetingSession {
   inputContextPrompt: string
   inputContextWarnings: string[]
   discussionStyle: DiscussionStyle
+  handRaiseMode: HandRaiseMode
   turnLimit: number
   currentTurn: number
   status: 'idle' | 'running' | 'finished'
@@ -489,6 +499,41 @@ function getMessagesSinceLastFacilitator(session: MeetingSession, facilitatorId:
   return Number.POSITIVE_INFINITY
 }
 
+function getMessagesSinceAgentSpoke(session: MeetingSession, agentId: string): number {
+  let count = 0
+
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    if (session.messages[index].agentId === agentId) {
+      return count
+    }
+
+    count += 1
+  }
+
+  return Number.POSITIVE_INFINITY
+}
+
+function countSubstringOccurrences(text: string, needle: string): number {
+  if (!needle.trim()) {
+    return 0
+  }
+
+  let count = 0
+  let searchIndex = 0
+
+  while (searchIndex < text.length) {
+    const foundAt = text.indexOf(needle, searchIndex)
+    if (foundAt === -1) {
+      break
+    }
+
+    count += 1
+    searchIndex = foundAt + needle.length
+  }
+
+  return count
+}
+
 function getParticipantRecencyPenalty(session: MeetingSession, agentId: string): number {
   const recentParticipantIds = [...session.messages]
     .reverse()
@@ -606,6 +651,8 @@ export class MeetingOrchestrator {
       session.inputContextWarnings = refreshedContext.warnings
     }
 
+    session.handRaiseMode = input.handRaiseMode ?? session.handRaiseMode
+
     if (session.stopRequested || session.status === 'finished') {
       session.status = 'finished'
       return this.serializeSession(session)
@@ -648,6 +695,7 @@ export class MeetingOrchestrator {
       inputContextPrompt,
       inputContextWarnings,
       discussionStyle: input.discussionStyle,
+      handRaiseMode: input.handRaiseMode ?? 'ai-evaluation',
       turnLimit: input.turnLimit,
       currentTurn: 1,
       status: 'idle',
@@ -815,40 +863,54 @@ export class MeetingOrchestrator {
     }
 
     const workerRuns: OrchestratorDebugSnapshot['workers'] = []
+    const useAiEvaluation = session.handRaiseMode === 'ai-evaluation'
+    let facilitatorDecision: FacilitatorDecision | null = null
+    let scores: ScoreDecision[] = []
 
-    const scoreTasks = participants.map(async (agent) => {
+    if (useAiEvaluation && facilitator) {
       const startedAt = Date.now()
-      const score = await this.scoreParticipantV2(session, agent)
+      facilitatorDecision = await this.moderateMeetingV2(session, facilitator)
       const finishedAt = Date.now()
       workerRuns.push({
-        workerId: `score:${agent.id}`,
-        kind: 'score',
-        targetAgentId: agent.id,
+        workerId: `moderation:${facilitator.id}`,
+        kind: 'moderation',
+        targetAgentId: facilitator.id,
         startedAt,
         finishedAt,
         durationMs: finishedAt - startedAt
       })
-      return score
-    })
 
-    const facilitatorTask = facilitator
-      ? (async () => {
+      scores = participants.map((agent) => {
+        const matched = facilitatorDecision?.participantScores.find((entry) => entry.agentId === agent.id)
+        return {
+          agentId: agent.id,
+          runtimeSessionId: agent.runtimeSessionId,
+          score: clamp(matched?.score ?? 40, 0, 100),
+          confidence: clamp(matched?.confidence ?? 50, 0, 100),
+          desiredAction: matched?.desiredAction ?? 'question',
+          reason: matched?.reason ?? 'Fallback score because the facilitator did not return a participant score.'
+        }
+      })
+    } else {
+      scores = await Promise.all(
+        participants.map(async (agent) => {
           const startedAt = Date.now()
-          const decision = await this.moderateMeetingV2(session, facilitator)
+          const score = useAiEvaluation
+            ? await this.scoreParticipantV2(session, agent)
+            : this.scoreParticipantRuleBased(session, agent)
           const finishedAt = Date.now()
           workerRuns.push({
-            workerId: `moderation:${facilitator.id}`,
-            kind: 'moderation',
-            targetAgentId: facilitator.id,
+            workerId: `score:${agent.id}`,
+            kind: 'score',
+            targetAgentId: agent.id,
             startedAt,
             finishedAt,
             durationMs: finishedAt - startedAt
           })
-          return decision
-        })()
-      : Promise.resolve<FacilitatorDecision | null>(null)
-
-    const [scores, facilitatorDecision] = await Promise.all([Promise.all(scoreTasks), facilitatorTask])
+          return score
+        })
+      )
+    }
 
     participants.forEach((agent) => {
       const score = scores.find((entry) => entry.agentId === agent.id)
@@ -1100,6 +1162,20 @@ export class MeetingOrchestrator {
     return true
   }
 
+  private async runMetaCli(
+    provider: AgentCliProvider,
+    model: string,
+    reasoningEffort: ReasoningEffort,
+    prompt: string
+  ): Promise<CliExecResult> {
+    return this.runCli({
+      provider,
+      model,
+      reasoningEffort,
+      prompt
+    })
+  }
+
   private async scoreParticipantV2(session: MeetingSession, agent: RuntimeAgent): Promise<ScoreDecision> {
     const transcript = getRecentTranscript(session, 8)
     const inboxText = agent.inbox.slice(-5).map((item) => item.summary).join(' / ')
@@ -1115,15 +1191,7 @@ export class MeetingOrchestrator {
       '{"score":0-100,"confidence":0-100,"desiredAction":"agree|challenge|question|synthesize|implement","reason":"short reason"}'
     ].filter(Boolean).join('\n\n')
 
-    const result = await this.runCli({
-      provider: agent.provider,
-      model: agent.model,
-      reasoningEffort: agent.reasoningEffort,
-      prompt,
-      sessionId: agent.runtimeSessionId ?? undefined
-    })
-
-    applyResultToAgent(agent, result)
+    const result = await this.runMetaCli(agent.provider, agent.model, agent.reasoningEffort, prompt)
 
     const parsed = extractJson<{ score?: number; confidence?: number; desiredAction?: string; reason?: string }>(result.response)
     return {
@@ -1133,6 +1201,57 @@ export class MeetingOrchestrator {
       confidence: clamp(parsed?.confidence ?? 50, 0, 100),
       desiredAction: parsed?.desiredAction ?? 'question',
       reason: parsed?.reason ?? 'Fallback score because the evaluation response was not structured.'
+    }
+  }
+
+  private scoreParticipantRuleBased(session: MeetingSession, agent: RuntimeAgent): ScoreDecision {
+    const participants = session.agents.filter((entry) => entry.role === 'Participant')
+    const quietParticipantIds = new Set(getQuietParticipantIds(participants))
+    const latestMessage = session.messages[session.messages.length - 1] ?? null
+    const messagesSinceOwnTurn = getMessagesSinceAgentSpoke(session, agent.id)
+    const mentionCount =
+      latestMessage && latestMessage.agentId !== agent.id ? countSubstringOccurrences(latestMessage.content, agent.name) : 0
+    const mentionBonus = Math.min(mentionCount, 2) * 16
+    const inboxBonus = Math.min(agent.inbox.length, 3) * 12
+    const quietBoost = quietParticipantIds.has(agent.id) ? 14 : 0
+    const firstTurnBoost = agent.speakCount === 0 ? 12 : 0
+    const staleBoost = Number.isFinite(messagesSinceOwnTurn) ? Math.min(messagesSinceOwnTurn, 4) * 4 : 18
+    const recencyPenalty = getParticipantRecencyPenalty(session, agent.id)
+    const score = clamp(34 + mentionBonus + inboxBonus + quietBoost + firstTurnBoost + staleBoost - recencyPenalty, 0, 100)
+
+    const desiredAction =
+      mentionBonus > 0 || inboxBonus > 0
+        ? 'question'
+        : quietBoost > 0
+          ? 'implement'
+          : messagesSinceOwnTurn >= 3
+            ? 'synthesize'
+            : 'agree'
+
+    const reasons: string[] = []
+    if (mentionBonus > 0) {
+      reasons.push('最新発言で名指しされた')
+    }
+    if (inboxBonus > 0) {
+      reasons.push('未処理の受信メッセージがある')
+    }
+    if (quietBoost > 0) {
+      reasons.push('発言回数が少なめ')
+    }
+    if (staleBoost >= 12) {
+      reasons.push('しばらく発言していない')
+    }
+    if (reasons.length === 0) {
+      reasons.push('直近の発言順を避けつつ均等化を優先')
+    }
+
+    return {
+      agentId: agent.id,
+      runtimeSessionId: agent.runtimeSessionId,
+      score,
+      confidence: 72,
+      desiredAction,
+      reason: reasons.join(' / ')
     }
   }
 
@@ -1197,23 +1316,28 @@ export class MeetingOrchestrator {
       'After several participant messages, it is good to briefly summarize direction and then hand off to one or two participants.',
       'Do not infer hidden roles, departments, stance labels, or personality labels of participants. Refer only to agent names and what they have actually said.',
       'Decide who should speak next and whether multiple participants should respond in parallel.',
+      'Also score every participant for hand-raise intensity.',
       'Return JSON only.',
-      '{"overview":"current state","rationale":"why","nextFocus":"next focus","selectedAgentId":"agent-id or null","selectedAgentIds":["agent-id"],"inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false,"parallelDispatch":true|false}'
+      '{"overview":"current state","rationale":"why","nextFocus":"next focus","selectedAgentId":"agent-id or null","selectedAgentIds":["agent-id"],"inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false,"parallelDispatch":true|false,"participantScores":[{"agentId":"agent-id","score":0-100,"confidence":0-100,"desiredAction":"agree|challenge|question|synthesize|implement","reason":"short reason"}]}'
     ].join('\n\n')
 
-    const result = await this.runCli({
-      provider: facilitator.provider,
-      model: facilitator.model,
-      reasoningEffort: facilitator.reasoningEffort,
-      prompt,
-      sessionId: facilitator.runtimeSessionId ?? undefined
-    })
-
-    applyResultToAgent(facilitator, result)
+    const result = await this.runMetaCli(facilitator.provider, facilitator.model, facilitator.reasoningEffort, prompt)
 
     const parsed = extractJson<Partial<FacilitatorDecision>>(result.response)
     const selectedAgentIds = Array.isArray(parsed?.selectedAgentIds) ? parsed.selectedAgentIds.filter(Boolean) : []
     const inviteAgentIds = Array.isArray(parsed?.inviteAgentIds) ? parsed.inviteAgentIds.filter(Boolean) : []
+    const participantScores = Array.isArray(parsed?.participantScores)
+      ? parsed.participantScores
+          .filter((entry): entry is FacilitatorDecision['participantScores'][number] => Boolean(entry && typeof entry === 'object'))
+          .map((entry) => ({
+            agentId: typeof entry.agentId === 'string' ? entry.agentId : '',
+            score: clamp(typeof entry.score === 'number' ? entry.score : 40, 0, 100),
+            confidence: clamp(typeof entry.confidence === 'number' ? entry.confidence : 50, 0, 100),
+            desiredAction: typeof entry.desiredAction === 'string' ? entry.desiredAction : 'question',
+            reason: typeof entry.reason === 'string' ? entry.reason : 'Fallback score because the facilitator did not return a reason.'
+          }))
+          .filter((entry) => entry.agentId.length > 0)
+      : []
 
     return {
       overview: parsed?.overview ?? 'Current state was not clearly returned.',
@@ -1224,7 +1348,8 @@ export class MeetingOrchestrator {
       inviteAgentIds,
       interventionPriority: clamp(parsed?.interventionPriority ?? 40, 0, 100),
       shouldIntervene: Boolean(parsed?.shouldIntervene),
-      parallelDispatch: Boolean(parsed?.parallelDispatch) || selectedAgentIds.length > 1
+      parallelDispatch: Boolean(parsed?.parallelDispatch) || selectedAgentIds.length > 1,
+      participantScores
     }
   }
 
@@ -1270,7 +1395,8 @@ export class MeetingOrchestrator {
       inviteAgentIds,
       interventionPriority: clamp(parsed?.interventionPriority ?? 40, 0, 100),
       shouldIntervene: Boolean(parsed?.shouldIntervene),
-      parallelDispatch: Boolean(parsed?.parallelDispatch) || selectedAgentIds.length > 1
+      parallelDispatch: Boolean(parsed?.parallelDispatch) || selectedAgentIds.length > 1,
+      participantScores: []
     }
   }
 

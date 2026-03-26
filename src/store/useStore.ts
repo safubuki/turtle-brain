@@ -148,7 +148,6 @@ interface TurtleBrainState {
   setInputPaths: (paths: string[]) => void
   setExecutionMode: (mode: ExecutionMode) => void
   setDiscussionStyle: (style: DiscussionStyle) => void
-  setHandRaiseMode: (mode: HandRaiseMode) => void
   setTurnLimit: (limit: number) => void
   addAgent: (agent: AgentProfile) => void
   updateAgent: (id: string, updates: Partial<AgentProfile>) => void
@@ -485,8 +484,20 @@ function getDiscussionStyleDefaults(style: DiscussionStyle): {
   return {
     agents: cloneAgents(meetingDefaultAgents),
     turnLimit: 3,
-    handRaiseMode: 'rule-based'
+    handRaiseMode: 'ai-evaluation'
   }
+}
+
+function getEffectiveHandRaiseMode(
+  discussionStyle: DiscussionStyle,
+  executionMode: ExecutionMode,
+  handRaiseMode: HandRaiseMode
+): HandRaiseMode {
+  if (discussionStyle === 'meeting' && executionMode === 'orchestration') {
+    return 'ai-evaluation'
+  }
+
+  return handRaiseMode === 'ai-evaluation' ? 'ai-evaluation' : 'rule-based'
 }
 
 const SETTINGS_STORAGE_KEY = 'turtle-brain:settings:v1'
@@ -524,8 +535,11 @@ function loadPersistedSettings(): PersistedSettingsSnapshot | null {
       parsed.discussionStyle === 'meeting' ? 'meeting' : 'conversation'
     const executionMode: ExecutionMode =
       parsed.executionMode === 'autonomous' ? 'autonomous' : 'orchestration'
-    const handRaiseMode: HandRaiseMode =
+    const handRaiseMode = getEffectiveHandRaiseMode(
+      discussionStyle,
+      executionMode,
       parsed.handRaiseMode === 'ai-evaluation' ? 'ai-evaluation' : 'rule-based'
+    )
     const turnLimit =
       typeof parsed.turnLimit === 'number' && Number.isFinite(parsed.turnLimit)
         ? Math.max(1, Math.min(12, Math.trunc(parsed.turnLimit)))
@@ -685,6 +699,13 @@ function normalizeCatalog(raw: ProviderCatalog, fallback: ProviderCatalog): Prov
 
 let currentTurnAbortController: AbortController | null = null
 const persistedSettings = loadPersistedSettings()
+const initialDiscussionStyle = persistedSettings?.discussionStyle ?? 'conversation'
+const initialExecutionMode = persistedSettings?.executionMode ?? 'orchestration'
+const initialHandRaiseMode = getEffectiveHandRaiseMode(
+  initialDiscussionStyle,
+  initialExecutionMode,
+  persistedSettings?.handRaiseMode ?? getDiscussionStyleDefaults(initialDiscussionStyle).handRaiseMode
+)
 
 export const useStore = create<TurtleBrainState>((set, get) => ({
   agents: persistedSettings?.agents ?? cloneAgents(conversationDefaultAgents),
@@ -693,9 +714,9 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
   turnLimit: persistedSettings?.turnLimit ?? 3,
   currentTurn: 0,
   environment: 'sandbox',
-  handRaiseMode: persistedSettings?.handRaiseMode ?? 'rule-based',
-  executionMode: persistedSettings?.executionMode ?? 'orchestration',
-  discussionStyle: persistedSettings?.discussionStyle ?? 'conversation',
+  handRaiseMode: initialHandRaiseMode,
+  executionMode: initialExecutionMode,
+  discussionStyle: initialDiscussionStyle,
   messages: [],
   sessionStatus: 'idle',
   finalConclusion: null,
@@ -711,8 +732,9 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
   setInputPaths: (inputPaths) => set({ inputPaths }),
 
   setExecutionMode: (executionMode) =>
-    set(() => ({
+    set((state) => ({
       executionMode,
+      handRaiseMode: getEffectiveHandRaiseMode(state.discussionStyle, executionMode, state.handRaiseMode),
       messages: [],
       currentTurn: 0,
       finalConclusion: null,
@@ -724,20 +746,24 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
     })),
 
   setDiscussionStyle: (discussionStyle) =>
-    set(() => ({
-      discussionStyle,
-      ...getDiscussionStyleDefaults(discussionStyle),
-      messages: [],
-      currentTurn: 0,
-      finalConclusion: null,
-      sessionError: null,
-      backendSessionId: null,
-      sessionRunNonce: 0,
-      orchestrationDebug: null,
-      sessionStatus: 'idle'
-    })),
+    set((state) => {
+      const defaults = getDiscussionStyleDefaults(discussionStyle)
 
-  setHandRaiseMode: (handRaiseMode) => set({ handRaiseMode }),
+      return {
+        discussionStyle,
+        ...defaults,
+        handRaiseMode: getEffectiveHandRaiseMode(discussionStyle, state.executionMode, defaults.handRaiseMode),
+        messages: [],
+        currentTurn: 0,
+        finalConclusion: null,
+        sessionError: null,
+        backendSessionId: null,
+        sessionRunNonce: 0,
+        orchestrationDebug: null,
+        sessionStatus: 'idle'
+      }
+    }),
+
   setTurnLimit: (turnLimit) => set({ turnLimit }),
 
   addAgent: (agent) =>
@@ -793,7 +819,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       version: 1,
       discussionStyle: state.discussionStyle,
       executionMode: state.executionMode,
-      handRaiseMode: state.handRaiseMode,
+      handRaiseMode: getEffectiveHandRaiseMode(state.discussionStyle, state.executionMode, state.handRaiseMode),
       turnLimit: state.turnLimit,
       agents: sanitizeAgents(state.agents)
     })
@@ -964,6 +990,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
           topic: state.topic,
           inputPaths: state.inputPaths,
           discussionStyle: state.discussionStyle,
+          handRaiseMode: getEffectiveHandRaiseMode(state.discussionStyle, state.executionMode, state.handRaiseMode),
           turnLimit: state.turnLimit,
           agents: state.agents
         })
