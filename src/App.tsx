@@ -622,12 +622,39 @@ function App() {
             {isDebugOpen && (
               <div className="space-y-4 rounded-xl border border-slate-700/50 bg-slate-900/40 p-4 text-sm text-slate-300">
                 <div className="space-y-1">
-                  <p className="font-semibold text-slate-100">バックエンド Session ID</p>
+                  <p className="font-semibold text-slate-100">オーケストレーション Session ID</p>
                   <p className="break-all font-mono text-xs text-slate-400">{backendSessionId ?? '未生成'}</p>
+                  <p className="text-xs text-slate-500">会話全体の管理用 ID です。各エージェントの CLI セッションは下に表示します。</p>
                 </div>
 
                 {orchestrationDebug ? (
                   <>
+                    <div className="space-y-2">
+                      <p className="font-semibold text-slate-100">エージェント別 CLI セッション</p>
+                      {orchestrationDebug.agentSessions.length > 0 ? (
+                        orchestrationDebug.agentSessions.map((agentSession) => {
+                          const agent = agents.find((entry) => entry.id === agentSession.agentId)
+                          return (
+                            <div
+                              key={agentSession.agentId}
+                              className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-2"
+                            >
+                              <p className="text-slate-100">
+                                {agent?.name ?? agentSession.agentId}
+                                {' / '}
+                                {agent ? PROVIDER_LABELS[agent.provider] : agentSession.agentId}
+                              </p>
+                              <p className="mt-1 break-all font-mono text-[11px] text-slate-400">
+                                {agentSession.runtimeSessionId ?? '未開始'}
+                              </p>
+                            </div>
+                          )
+                        })
+                      ) : (
+                        <p className="text-xs text-slate-500">まだエージェントの CLI セッションは開始されていません。</p>
+                      )}
+                    </div>
+
                     <div className="space-y-1">
                       <p className="font-semibold text-slate-100">最新ディスパッチ理由</p>
                       <p className="leading-6 text-slate-300">{orchestrationDebug.dispatchReason}</p>

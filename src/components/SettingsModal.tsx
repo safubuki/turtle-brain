@@ -126,6 +126,33 @@ function getCatalogStatusLabel(status: 'idle' | 'loading' | 'ready' | 'error'): 
   }
 }
 
+function getProviderInstallCardMessage(isAvailable: boolean, hasInstallSpec: boolean): string {
+  if (isAvailable) {
+    return '利用可能な CLI です。'
+  }
+
+  if (hasInstallSpec) {
+    return 'CLI は未インストールです。下のボタンかコマンドからインストールできます。'
+  }
+
+  return 'CLI は未インストールです。'
+}
+
+function getProviderSelectionHelpMessage(
+  isProviderSelectionReady: boolean,
+  isCurrentProviderInstalled: boolean
+): string {
+  if (!isProviderSelectionReady) {
+    return 'CLI 状態を確認中です。確認後に切り替えできます。'
+  }
+
+  if (isCurrentProviderInstalled) {
+    return 'インストール済みの CLI です。'
+  }
+
+  return '現在の CLI は未インストールです。上部の CLI 状態からインストールできます。'
+}
+
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -382,7 +409,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setInstallFeedback(`${spec.label} をインストールしました。`)
       await refreshProviderCatalogs(true)
     } catch (error) {
-      setInstallFeedback(error instanceof Error ? error.message : String(error))
+      console.error(`Failed to install ${provider}:`, error)
+      setInstallFeedback(`${spec.label} のインストールに失敗しました。表示コマンドを手動で実行してください。`)
     } finally {
       setInstallBusyProvider(null)
     }
@@ -470,9 +498,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       {catalog?.source ? `検出元: ${catalog.source}` : '検出情報なし'}
                     </p>
                     <p className="mt-1 text-xs leading-5 text-slate-500">
-                      未導入時はボタン押下後に実行コマンドを確認してからインストールします。
+                      {getProviderInstallCardMessage(isAvailable, Boolean(spec))}
                     </p>
-                    {catalog?.error && <p className="mt-2 text-xs leading-5 text-rose-300">{catalog.error}</p>}
 
                     {!isAvailable && spec && (
                       <div className="mt-3 space-y-2">
@@ -484,7 +511,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         >
                           {installBusyProvider === provider ? 'インストール中...' : 'インストール'}
                         </button>
-                        <p className="rounded-lg border border-slate-700/50 bg-slate-950/40 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
+                        <p className="break-all whitespace-pre-wrap rounded-lg border border-slate-700/50 bg-slate-950/40 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
                           {spec.displayCommand}
                         </p>
                       </div>
@@ -961,12 +988,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             )
                           })}
                         </select>
-                        <p className={`text-xs ${isCurrentProviderInstalled ? 'text-slate-500' : 'text-rose-300'}`}>
-                          {!isProviderSelectionReady
-                            ? 'CLI 状態を確認中です。確認完了まで切り替えを保留しています。'
-                            : isCurrentProviderInstalled
-                              ? 'インストール済み CLI のみ選択できます。'
-                              : '現在の CLI は未インストールです。インストール済み CLI に切り替えてください。'}
+                        <p className={`text-xs ${isCurrentProviderInstalled ? 'text-slate-500' : 'text-amber-300'}`}>
+                          {getProviderSelectionHelpMessage(isProviderSelectionReady, isCurrentProviderInstalled)}
                         </p>
                       </div>
                       <div className="space-y-1.5">

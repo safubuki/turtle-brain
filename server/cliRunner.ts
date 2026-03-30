@@ -97,8 +97,7 @@ function sanitizeSessionId(sessionId: string | undefined | null): string | null 
 }
 
 function shouldResumeSession(provider: AgentCliProvider): boolean {
-  void provider
-  return false
+  return provider === 'codex' || provider === 'gemini'
 }
 
 function getNpmRoot(): string {
