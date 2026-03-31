@@ -136,13 +136,13 @@ function getCatalogStatusLabel(status: 'idle' | 'loading' | 'ready' | 'error'): 
 function getProviderInstallCardMessage(
   isAvailable: boolean,
   hasInstallSpec: boolean,
-  canAutoInstall: boolean
+  shouldRequireNodeSetup: boolean
 ): string {
   if (isAvailable) {
     return '利用可能な CLI です。'
   }
 
-  if (!canAutoInstall) {
+  if (shouldRequireNodeSetup) {
     return 'この環境では npm が使えないため、先に Node.js のセットアップが必要です。'
   }
 
@@ -156,7 +156,7 @@ function getProviderInstallCardMessage(
 function getProviderSelectionHelpMessage(
   isProviderSelectionReady: boolean,
   isCurrentProviderInstalled: boolean,
-  canAutoInstall: boolean
+  shouldRequireNodeSetup: boolean
 ): string {
   if (!isProviderSelectionReady) {
     return 'CLI 状態を確認中です。確認後に切り替えできます。'
@@ -166,7 +166,7 @@ function getProviderSelectionHelpMessage(
     return 'インストール済みの CLI です。'
   }
 
-  if (!canAutoInstall) {
+  if (shouldRequireNodeSetup) {
     return 'npm が見つからないため、自動インストール前に Node.js のセットアップが必要です。'
   }
 
@@ -380,8 +380,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const availableProviders = isProviderSelectionReady
     ? ALL_PROVIDERS.filter((provider) => providerCatalogs[provider]?.available)
     : []
+  const hasAnyProviderInstalled = isProviderSelectionReady && availableProviders.length > 0
   const canAutoInstall = installRuntime?.npmAvailable ?? true
-  const shouldShowBaseSetupGuide = isProviderSelectionReady && availableProviders.length === 0 && !canAutoInstall
+  const shouldRequireNodeSetup = !canAutoInstall && !hasAnyProviderInstalled
+  const shouldShowBaseSetupGuide = isProviderSelectionReady && !hasAnyProviderInstalled && !canAutoInstall
   const getCustomKey = (agentId: string, field: 'stance' | 'personality') => `${agentId}:${field}`
   const setCustomValue = (agentId: string, field: 'stance' | 'personality', value: string) => {
     setCustomInputs((current) => ({ ...current, [getCustomKey(agentId, field)]: value }))
@@ -406,7 +408,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       return
     }
 
-    if (!canAutoInstall) {
+    if (shouldRequireNodeSetup) {
       setInstallFeedback('Node.js のセットアップが必要です。上部の案内を確認してから再試行してください。')
       return
     }
@@ -502,7 +504,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         <div className="flex-1 space-y-8 overflow-y-auto px-6 py-6">
           <section className="space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">CLI 状態</h3>
+              <div className="flex items-center gap-4">
+                <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">CLI 状態</h3>
+                <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
+                  {shouldRequireNodeSetup ? 'Node.js が必要' : 'CLI をインストール'}
+                </span>
+              </div>
               <div className="rounded-full border border-slate-700/60 bg-slate-900/40 px-3 py-1 text-xs text-slate-400">
                 緑=導入済み / 赤=未導入
               </div>
@@ -557,7 +564,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       {catalog?.source ? `検出元: ${catalog.source}` : '検出情報なし'}
                     </p>
                     <p className="mt-1 text-xs leading-5 text-slate-500">
-                      {getProviderInstallCardMessage(isAvailable, Boolean(spec), canAutoInstall)}
+                      {getProviderInstallCardMessage(isAvailable, Boolean(spec), shouldRequireNodeSetup)}
                     </p>
 
                     {!isAvailable && spec && (
@@ -565,10 +572,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         <button
                           type="button"
                           onClick={() => void handleInstallProvider(provider)}
-                          disabled={installBusyProvider !== null || !canAutoInstall}
+                          disabled={installBusyProvider !== null || shouldRequireNodeSetup}
                           className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          {installBusyProvider === provider ? 'インストール中...' : canAutoInstall ? 'インストール' : 'Node.js が必要'}
+                          {installBusyProvider === provider ? 'インストール中...' : shouldRequireNodeSetup ? 'Node.js が必要' : 'インストール'}
                         </button>
                         <p className="break-all whitespace-pre-wrap rounded-lg border border-slate-700/50 bg-slate-950/40 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
                           {spec.displayCommand}
@@ -1051,7 +1058,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           {getProviderSelectionHelpMessage(
                             isProviderSelectionReady,
                             isCurrentProviderInstalled,
-                            canAutoInstall
+                            shouldRequireNodeSetup
                           )}
                         </p>
                       </div>
