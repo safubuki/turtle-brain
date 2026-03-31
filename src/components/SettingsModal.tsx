@@ -35,6 +35,13 @@ interface ProviderInstallSpec {
   displayCommand: string
 }
 
+interface ProviderInstallRuntimeStatus {
+  nodeVersion: string | null
+  npmCommand: string
+  npmVersion: string | null
+  npmAvailable: boolean
+}
+
 interface SelectionPanelProps {
   title: string
   presets: readonly string[]
@@ -126,9 +133,17 @@ function getCatalogStatusLabel(status: 'idle' | 'loading' | 'ready' | 'error'): 
   }
 }
 
-function getProviderInstallCardMessage(isAvailable: boolean, hasInstallSpec: boolean): string {
+function getProviderInstallCardMessage(
+  isAvailable: boolean,
+  hasInstallSpec: boolean,
+  canAutoInstall: boolean
+): string {
   if (isAvailable) {
     return '利用可能な CLI です。'
+  }
+
+  if (!canAutoInstall) {
+    return 'この環境では npm が使えないため、先に Node.js のセットアップが必要です。'
   }
 
   if (hasInstallSpec) {
@@ -140,7 +155,8 @@ function getProviderInstallCardMessage(isAvailable: boolean, hasInstallSpec: boo
 
 function getProviderSelectionHelpMessage(
   isProviderSelectionReady: boolean,
-  isCurrentProviderInstalled: boolean
+  isCurrentProviderInstalled: boolean,
+  canAutoInstall: boolean
 ): string {
   if (!isProviderSelectionReady) {
     return 'CLI 状態を確認中です。確認後に切り替えできます。'
@@ -148,6 +164,10 @@ function getProviderSelectionHelpMessage(
 
   if (isCurrentProviderInstalled) {
     return 'インストール済みの CLI です。'
+  }
+
+  if (!canAutoInstall) {
+    return 'npm が見つからないため、自動インストール前に Node.js のセットアップが必要です。'
   }
 
   return '現在の CLI は未インストールです。上部の CLI 状態からインストールできます。'
@@ -298,6 +318,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [customInputs, setCustomInputs] = useState<Record<string, string>>({})
   const [openPanel, setOpenPanel] = useState<{ agentId: string; type: 'stance' | 'personality' } | null>(null)
   const [installSpecs, setInstallSpecs] = useState<Record<'codex' | 'gemini' | 'copilot', ProviderInstallSpec> | null>(null)
+  const [installRuntime, setInstallRuntime] = useState<ProviderInstallRuntimeStatus | null>(null)
   const [installBusyProvider, setInstallBusyProvider] = useState<'codex' | 'gemini' | 'copilot' | null>(null)
   const [installFeedback, setInstallFeedback] = useState<string | null>(null)
 
@@ -334,13 +355,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         const data = await apiRequestJson<{
           success?: boolean
           providers?: Record<'codex' | 'gemini' | 'copilot', ProviderInstallSpec>
+          runtime?: ProviderInstallRuntimeStatus
         }>('/api/providers/install-info')
 
         if (data.success && data.providers) {
           setInstallSpecs(data.providers)
+          setInstallRuntime(data.runtime ?? null)
         }
       } catch (error) {
         console.error('Failed to load provider install info:', error)
+        setInstallRuntime(null)
       }
     })()
   }, [isOpen, refreshProviderCatalogs])
@@ -356,6 +380,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const availableProviders = isProviderSelectionReady
     ? ALL_PROVIDERS.filter((provider) => providerCatalogs[provider]?.available)
     : []
+  const canAutoInstall = installRuntime?.npmAvailable ?? true
+  const shouldShowBaseSetupGuide = isProviderSelectionReady && availableProviders.length === 0 && !canAutoInstall
   const getCustomKey = (agentId: string, field: 'stance' | 'personality') => `${agentId}:${field}`
   const setCustomValue = (agentId: string, field: 'stance' | 'personality', value: string) => {
     setCustomInputs((current) => ({ ...current, [getCustomKey(agentId, field)]: value }))
@@ -377,6 +403,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const handleInstallProvider = async (provider: 'codex' | 'gemini' | 'copilot') => {
     const spec = installSpecs?.[provider]
     if (!spec) {
+      return
+    }
+
+    if (!canAutoInstall) {
+      setInstallFeedback('Node.js のセットアップが必要です。上部の案内を確認してから再試行してください。')
       return
     }
 
@@ -410,7 +441,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       await refreshProviderCatalogs(true)
     } catch (error) {
       console.error(`Failed to install ${provider}:`, error)
-      setInstallFeedback(`${spec.label} のインストールに失敗しました。表示コマンドを手動で実行してください。`)
+      if (error instanceof Error && /NODE_SETUP_REQUIRED/i.test(error.message)) {
+        setInstallFeedback('Node.js のセットアップが必要です。上部の案内を確認してから再試行してください。')
+      } else {
+        setInstallFeedback(`${spec.label} のインストールに失敗しました。表示コマンドを手動で実行してください。`)
+      }
     } finally {
       setInstallBusyProvider(null)
     }
@@ -473,6 +508,30 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               </div>
             </div>
 
+            {shouldShowBaseSetupGuide && (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-4 text-sm text-amber-100">
+                <p className="font-semibold text-amber-200">先に Node.js のセットアップが必要です</p>
+                <p className="mt-2 text-xs leading-6 text-amber-100/90">
+                  この環境では <span className="font-mono">{installRuntime?.npmCommand ?? 'npm'}</span> が使えないため、CLI の自動インストールをまだ実行できません。
+                </p>
+                <p className="mt-2 text-xs leading-6 text-amber-100/90">
+                  1. Node.js をインストールしてください（npm 同梱）
+                  <br />
+                  2. 設定画面を開き直すか、CLI 状態を再読み込みしてください
+                  <br />
+                  3. その後に下の CLI インストールを実行してください
+                </p>
+                <a
+                  href="https://nodejs.org/ja"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 inline-flex text-xs font-medium text-amber-200 underline underline-offset-2 hover:text-white"
+                >
+                  Node.js 公式サイトを開く
+                </a>
+              </div>
+            )}
+
             <div className="grid gap-3 md:grid-cols-3">
               {(['codex', 'gemini', 'copilot'] as const).map((provider) => {
                 const catalog = providerCatalogs[provider]
@@ -498,7 +557,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       {catalog?.source ? `検出元: ${catalog.source}` : '検出情報なし'}
                     </p>
                     <p className="mt-1 text-xs leading-5 text-slate-500">
-                      {getProviderInstallCardMessage(isAvailable, Boolean(spec))}
+                      {getProviderInstallCardMessage(isAvailable, Boolean(spec), canAutoInstall)}
                     </p>
 
                     {!isAvailable && spec && (
@@ -506,10 +565,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         <button
                           type="button"
                           onClick={() => void handleInstallProvider(provider)}
-                          disabled={installBusyProvider !== null}
+                          disabled={installBusyProvider !== null || !canAutoInstall}
                           className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          {installBusyProvider === provider ? 'インストール中...' : 'インストール'}
+                          {installBusyProvider === provider ? 'インストール中...' : canAutoInstall ? 'インストール' : 'Node.js が必要'}
                         </button>
                         <p className="break-all whitespace-pre-wrap rounded-lg border border-slate-700/50 bg-slate-950/40 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
                           {spec.displayCommand}
@@ -989,7 +1048,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           })}
                         </select>
                         <p className={`text-xs ${isCurrentProviderInstalled ? 'text-slate-500' : 'text-amber-300'}`}>
-                          {getProviderSelectionHelpMessage(isProviderSelectionReady, isCurrentProviderInstalled)}
+                          {getProviderSelectionHelpMessage(
+                            isProviderSelectionReady,
+                            isCurrentProviderInstalled,
+                            canAutoInstall
+                          )}
                         </p>
                       </div>
                       <div className="space-y-1.5">

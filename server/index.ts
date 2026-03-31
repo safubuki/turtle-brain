@@ -6,7 +6,7 @@ import { loadInputContext } from './contextLoader'
 import { pickFilesDialog, pickFolderDialog } from './nativeDialog'
 import { MeetingOrchestrator, type RunTurnRequest } from './orchestrator'
 import { getProviderCatalogs } from './providerCatalog'
-import { getProviderInstallSpec, installProviderCli } from './providerInstaller'
+import { getProviderInstallRuntimeStatus, getProviderInstallSpec, installProviderCli } from './providerInstaller'
 
 dotenv.config()
 
@@ -50,15 +50,26 @@ app.get('/api/providers/catalogs', async (req, res) => {
   }
 })
 
-app.get('/api/providers/install-info', (_req, res) => {
-  res.json({
-    success: true,
-    providers: {
-      codex: getProviderInstallSpec('codex'),
-      gemini: getProviderInstallSpec('gemini'),
-      copilot: getProviderInstallSpec('copilot')
-    }
-  })
+app.get('/api/providers/install-info', async (_req, res) => {
+  try {
+    const runtime = await getProviderInstallRuntimeStatus()
+    res.json({
+      success: true,
+      providers: {
+        codex: getProviderInstallSpec('codex'),
+        gemini: getProviderInstallSpec('gemini'),
+        copilot: getProviderInstallSpec('copilot')
+      },
+      runtime
+    })
+  } catch (error) {
+    console.error('[API] Error while loading provider install info:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error',
+      details: String(error)
+    })
+  }
 })
 
 app.post('/api/providers/install', async (req, res) => {
@@ -82,11 +93,12 @@ app.post('/api/providers/install', async (req, res) => {
       stderr: result.stderr
     })
   } catch (error) {
+    const isPrerequisiteError = error instanceof Error && /NODE_SETUP_REQUIRED/i.test(error.message)
     console.error('[API] Error while installing provider CLI:', error)
-    res.status(500).json({
+    res.status(isPrerequisiteError ? 409 : 500).json({
       success: false,
-      error: 'Internal Server Error',
-      details: String(error)
+      error: isPrerequisiteError ? 'Prerequisite Required' : 'Internal Server Error',
+      details: isPrerequisiteError ? 'NODE_SETUP_REQUIRED' : String(error)
     })
   }
 })

@@ -9,8 +9,65 @@ export interface ProviderInstallSpec {
   displayCommand: string
 }
 
+export interface ProviderInstallRuntimeStatus {
+  nodeVersion: string | null
+  npmCommand: string
+  npmVersion: string | null
+  npmAvailable: boolean
+}
+
 function getNpmCommand(): string {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm'
+}
+
+async function runCommand(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      windowsHide: true
+    })
+
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString()
+    })
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', (error) => {
+      reject(error)
+    })
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `${command} ${args.join(' ')} failed with code ${code}`))
+        return
+      }
+
+      resolve(stdout.trim() || stderr.trim())
+    })
+  })
+}
+
+export async function getProviderInstallRuntimeStatus(): Promise<ProviderInstallRuntimeStatus> {
+  const npmCommand = getNpmCommand()
+  let npmVersion: string | null = null
+
+  try {
+    npmVersion = await runCommand(npmCommand, ['--version'])
+  } catch {
+    npmVersion = null
+  }
+
+  return {
+    nodeVersion: process.version ?? null,
+    npmCommand,
+    npmVersion,
+    npmAvailable: Boolean(npmVersion)
+  }
 }
 
 export function getProviderInstallSpec(provider: AgentCliProvider): ProviderInstallSpec {
@@ -50,6 +107,11 @@ export async function installProviderCli(provider: AgentCliProvider): Promise<{
   stderr: string
 }> {
   const spec = getProviderInstallSpec(provider)
+  const runtimeStatus = await getProviderInstallRuntimeStatus()
+
+  if (!runtimeStatus.npmAvailable) {
+    throw new Error('NODE_SETUP_REQUIRED')
+  }
 
   return new Promise((resolve, reject) => {
     const child = spawn(spec.command, spec.args, {
