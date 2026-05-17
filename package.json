@@ -9,6 +9,10 @@
     "dev:server": "npm --prefix server run dev",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "lint:app": "eslint src --max-warnings=0",
+    "typecheck:app": "tsc -p tsconfig.app.json --noEmit",
+    "typecheck:server": "npm --prefix server run typecheck",
+    "test:server": "npm --prefix server test",
     "preview": "vite preview"
   },
   "dependencies": {

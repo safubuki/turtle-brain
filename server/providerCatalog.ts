@@ -1,4 +1,4 @@
-import { spawn } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import { existsSync } from 'fs'
 import fs from 'fs/promises'
 import path from 'path'
@@ -39,6 +39,7 @@ function dedupeStrings(values: Array<string | null | undefined>): string[] {
 }
 
 function getCandidateNpmRoots(): string[] {
+  const npmGlobalRoot = getNpmGlobalBinRoot()
   const pathRoots =
     process.env.PATH?.split(path.delimiter)
       .map((entry) => entry.trim())
@@ -46,12 +47,60 @@ function getCandidateNpmRoots(): string[] {
       .filter((entry) => /[\\/]npm$/i.test(entry) || /appdata[\\/]roaming[\\/]npm/i.test(entry)) ?? []
 
   return dedupeStrings([
+    npmGlobalRoot,
     process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : null,
     process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm') : null,
     process.env.NPM_CONFIG_PREFIX || null,
     process.env.npm_config_prefix || null,
     ...pathRoots
   ])
+}
+
+function getNpmCommand(): string {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm'
+}
+
+function getNpmGlobalBinRoot(): string | null {
+  try {
+    const rawRoot = execFileSync(getNpmCommand(), ['root', '-g'], {
+      encoding: 'utf8',
+      windowsHide: true
+    }).trim()
+
+    if (!rawRoot) {
+      return null
+    }
+
+    return path.basename(rawRoot).toLowerCase() === 'node_modules'
+      ? path.dirname(rawRoot)
+      : rawRoot
+  } catch {
+    return null
+  }
+}
+
+function findCommandPath(commandName: string, preferredRoot?: string): string | null {
+  const extensions = process.platform === 'win32' ? ['.cmd', '.exe', ''] : ['']
+  const roots = dedupeStrings([
+    preferredRoot,
+    ...getCandidateNpmRoots(),
+    ...(process.env.PATH?.split(path.delimiter) ?? [])
+  ])
+
+  for (const root of roots) {
+    for (const extension of extensions) {
+      const candidate = path.join(root, `${commandName}${extension}`)
+      if (existsSync(candidate)) {
+        return candidate
+      }
+    }
+  }
+
+  return null
+}
+
+function getProviderCommandName(provider: AgentCliProvider): string {
+  return provider
 }
 
 function getCopilotSdkModulePath(): string | null {
@@ -102,6 +151,23 @@ function createFallbackCatalog(provider: AgentCliProvider, error: string | null 
         { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview', supportedReasoningEfforts: [], defaultReasoningEffort: null, billingMultiplier: null },
         { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', supportedReasoningEfforts: [], defaultReasoningEffort: null, billingMultiplier: null },
         { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', supportedReasoningEfforts: [], defaultReasoningEffort: null, billingMultiplier: null }
+      ]
+    }
+  }
+
+  if (provider === 'claude') {
+    return {
+      provider,
+      label: 'Claude Code',
+      source: 'fallback',
+      fetchedAt: now,
+      available,
+      error,
+      models: [
+        { id: 'sonnet', name: 'Sonnet (latest alias)', description: 'Claude Code latest Sonnet alias.', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
+        { id: 'opus', name: 'Opus (latest alias)', description: 'Claude Code latest Opus alias.', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'high', billingMultiplier: null },
+        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
+        { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'high', billingMultiplier: null }
       ]
     }
   }
@@ -166,6 +232,62 @@ function runNodeScript(script: string, timeoutMs = 30000): Promise<string> {
       resolve(stdout.trim())
     })
   })
+}
+
+function runCommand(command: string, args: string[], timeoutMs = 15000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    })
+
+    let stdout = ''
+    let stderr = ''
+    const timeout = setTimeout(() => {
+      child.kill()
+      reject(new Error(`${command} ${args.join(' ')} timed out`))
+    }, timeoutMs)
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString()
+    })
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
+
+    child.on('close', (code) => {
+      clearTimeout(timeout)
+
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `${command} exited with code ${code}`))
+        return
+      }
+
+      resolve(stdout.trim() || stderr.trim())
+    })
+  })
+}
+
+function createDetectedFallbackCatalog(provider: AgentCliProvider, reason: unknown): ProviderCatalogResponse {
+  const commandPath = findCommandPath(getProviderCommandName(provider))
+  const reasonText = reason instanceof Error ? reason.message : String(reason)
+
+  if (!commandPath) {
+    return createFallbackCatalog(provider, reasonText)
+  }
+
+  return {
+    ...createFallbackCatalog(provider, null),
+    source: `fallback (${commandPath})`,
+    available: true,
+    error: reasonText ? `Model discovery fallback: ${reasonText}` : null
+  }
 }
 
 function normalizeReasoningEfforts(value: unknown): ReasoningEffort[] {
@@ -245,20 +367,36 @@ async function discoverCodexCatalog(): Promise<ProviderCatalogResponse> {
 }
 
 async function discoverGeminiCatalog(): Promise<ProviderCatalogResponse> {
-  const modelsFilePath = path.join(
-    process.env.APPDATA ?? '',
-    'npm',
-    'node_modules',
-    '@google',
-    'gemini-cli',
-    'node_modules',
-    '@google',
-    'gemini-cli-core',
-    'dist',
-    'src',
-    'config',
-    'models.js'
-  )
+  const commandPath = findCommandPath('gemini')
+  if (!commandPath) {
+    throw new Error('Gemini CLI command was not found on PATH or npm global roots.')
+  }
+
+  const modelsFilePath = getCandidateNpmRoots()
+    .map((npmRoot) => path.join(
+      npmRoot,
+      'node_modules',
+      '@google',
+      'gemini-cli',
+      'node_modules',
+      '@google',
+      'gemini-cli-core',
+      'dist',
+      'src',
+      'config',
+      'models.js'
+    ))
+    .find((candidate) => existsSync(candidate))
+
+  if (!modelsFilePath) {
+    return {
+      ...createFallbackCatalog('gemini', null),
+      source: `Gemini CLI command (${commandPath})`,
+      available: true,
+      error: null
+    }
+  }
+
   const modelsSource = await fs.readFile(modelsFilePath, 'utf8')
 
   const modelConstants = Object.fromEntries(
@@ -315,7 +453,7 @@ async function discoverGeminiCatalog(): Promise<ProviderCatalogResponse> {
   return {
     provider: 'gemini',
     label: 'Gemini CLI',
-    source: 'Gemini CLI core constants',
+    source: `Gemini CLI core constants (${modelsFilePath})`,
     fetchedAt: new Date().toISOString(),
     available: true,
     error: null,
@@ -377,21 +515,44 @@ async function discoverCopilotCatalog(): Promise<ProviderCatalogResponse> {
   }
 }
 
+async function discoverClaudeCatalog(): Promise<ProviderCatalogResponse> {
+  const commandPath = findCommandPath('claude')
+  if (!commandPath) {
+    throw new Error('Claude Code command was not found on PATH.')
+  }
+
+  let version = ''
+  try {
+    version = await runCommand(commandPath, ['--version'], 10000)
+  } catch {
+    version = ''
+  }
+
+  return {
+    ...createFallbackCatalog('claude', null),
+    source: version ? `Claude Code ${version} (${commandPath})` : `Claude Code command (${commandPath})`,
+    available: true,
+    error: null
+  }
+}
+
 export async function getProviderCatalogs(forceRefresh = false): Promise<ProviderCatalogMap> {
   if (!forceRefresh && cachedCatalogs && Date.now() - cachedCatalogs.fetchedAt < CACHE_TTL_MS) {
     return cachedCatalogs.catalogs
   }
 
-  const [codexResult, geminiResult, copilotResult] = await Promise.allSettled([
+  const [codexResult, geminiResult, copilotResult, claudeResult] = await Promise.allSettled([
     discoverCodexCatalog(),
     discoverGeminiCatalog(),
-    discoverCopilotCatalog()
+    discoverCopilotCatalog(),
+    discoverClaudeCatalog()
   ])
 
   const catalogs: ProviderCatalogMap = {
-    codex: codexResult.status === 'fulfilled' ? codexResult.value : createFallbackCatalog('codex', codexResult.reason instanceof Error ? codexResult.reason.message : String(codexResult.reason)),
-    gemini: geminiResult.status === 'fulfilled' ? geminiResult.value : createFallbackCatalog('gemini', geminiResult.reason instanceof Error ? geminiResult.reason.message : String(geminiResult.reason)),
-    copilot: copilotResult.status === 'fulfilled' ? copilotResult.value : createFallbackCatalog('copilot', copilotResult.reason instanceof Error ? copilotResult.reason.message : String(copilotResult.reason))
+    codex: codexResult.status === 'fulfilled' ? codexResult.value : createDetectedFallbackCatalog('codex', codexResult.reason),
+    gemini: geminiResult.status === 'fulfilled' ? geminiResult.value : createDetectedFallbackCatalog('gemini', geminiResult.reason),
+    copilot: copilotResult.status === 'fulfilled' ? copilotResult.value : createDetectedFallbackCatalog('copilot', copilotResult.reason),
+    claude: claudeResult.status === 'fulfilled' ? claudeResult.value : createDetectedFallbackCatalog('claude', claudeResult.reason)
   }
 
   cachedCatalogs = {

@@ -15,13 +15,18 @@ import {
 import { AgentAvatar } from './components/AgentAvatar'
 import { AgentRuntimeMeta } from './components/AgentRuntimeMeta'
 import { SettingsModal } from './components/SettingsModal'
-import { PROVIDER_LABELS, formatAgentRole } from './config/agentMetadata'
+import { PROVIDER_LABELS, formatAgentRole, getViewpointRolePreset } from './config/agentMetadata'
 import { TITLE_ICON_SRC } from './config/iconAssets'
 import { DISCUSSION_STYLE_METADATA, EXECUTION_MODE_METADATA } from './config/modeMetadata'
 import { apiRequestJson } from './lib/apiClient'
-import { useStore, type AgentProfile, type Message } from './store/useStore'
+import { useStore, type AgentProfile, type Message, type StructuredFinalConclusion } from './store/useStore'
 
 interface ConclusionSection {
+  title: string
+  lines: string[]
+}
+
+interface StructuredConclusionSection {
   title: string
   lines: string[]
 }
@@ -171,6 +176,52 @@ function parseConclusionSections(content: string): ConclusionSection[] {
   }
 
   return [{ title: '結論', lines: splitReadableLines(normalized) }]
+}
+
+function structuredConclusionToSections(conclusion: StructuredFinalConclusion): StructuredConclusionSection[] {
+  return [
+    {
+      title: '結論サマリー',
+      lines: [conclusion.conclusionSummary]
+    },
+    {
+      title: '最終回答',
+      lines: [conclusion.finalAnswer]
+    },
+    {
+      title: '理由・根拠',
+      lines: [...conclusion.reasoning, ...conclusion.supportingPoints]
+    },
+    {
+      title: '反対意見・未解決事項・リスク',
+      lines: [
+        ...conclusion.counterArguments.map((item) => `反対意見: ${item}`),
+        ...conclusion.unresolvedIssues.map((item) => `未解決: ${item}`),
+        ...conclusion.risks.map((item) => `リスク: ${item}`)
+      ]
+    },
+    {
+      title: '次のアクション',
+      lines: conclusion.nextActions.map((action) => `${action.priority}: ${action.label} - ${action.detail}`)
+    }
+  ].map((section) => ({
+    ...section,
+    lines: section.lines.length > 0 ? section.lines : ['該当なし']
+  }))
+}
+
+function appendStructuredConclusionMarkdown(base: string, conclusion: StructuredFinalConclusion): string {
+  let md = base
+  md += `### ${conclusion.title}\n`
+  md += `信頼度: ${conclusion.confidence.score} / 100 - ${conclusion.confidence.reason}\n\n`
+  structuredConclusionToSections(conclusion).forEach((section) => {
+    md += `### ${section.title}\n`
+    section.lines.forEach((line) => {
+      md += `${line}\n`
+    })
+    md += '\n'
+  })
+  return md
 }
 
 function getAgentAliases(agent: AgentProfile): string[] {
@@ -347,6 +398,7 @@ function App() {
     currentTurn,
     processNextTurn,
     finalConclusion,
+    finalConclusionStructured,
     executionMode,
     discussionStyle,
     sessionError,
@@ -369,7 +421,10 @@ function App() {
   const requestedTurnRef = useRef<string | null>(null)
 
   const orderedMessages = [...messages].sort((left, right) => left.timestamp - right.timestamp)
-  const conclusionSections = finalConclusion ? parseConclusionSections(finalConclusion) : []
+  const structuredConclusionSections = finalConclusionStructured
+    ? structuredConclusionToSections(finalConclusionStructured)
+    : []
+  const conclusionSections = finalConclusion && !finalConclusionStructured ? parseConclusionSections(finalConclusion) : []
   const pendingInputPaths = dedupePaths(localInputPaths)
 
   useEffect(() => {
@@ -438,7 +493,15 @@ function App() {
 
     md += '\n## 参加エージェント\n\n'
     agents.forEach((agent) => {
+      const viewpointPreset = getViewpointRolePreset(agent.viewpointRoleId)
       md += `### ${agent.name}\n`
+      md += `- 視点ロール: ${viewpointPreset?.label ?? '標準'}\n`
+      if (agent.viewpointFocus) {
+        md += `- 重視する観点: ${agent.viewpointFocus}\n`
+      }
+      if (agent.viewpointAvoid) {
+        md += `- 避ける振る舞い: ${agent.viewpointAvoid}\n`
+      }
       md += `- ロール: ${formatAgentRole(agent.role)}\n`
       md += `- スタンス: ${agent.stance}\n`
       md += `- 性格: ${agent.personality}\n`
@@ -447,9 +510,11 @@ function App() {
       md += `- Reasoning: ${agent.reasoningEffort}\n\n`
     })
 
-    if (finalConclusion) {
+    if (finalConclusionStructured || finalConclusion) {
       md += '## 最終結論\n\n'
-      if (conclusionSections.length > 0) {
+      if (finalConclusionStructured) {
+        md = appendStructuredConclusionMarkdown(md, finalConclusionStructured)
+      } else if (conclusionSections.length > 0) {
         conclusionSections.forEach((section) => {
           md += `### ${section.title}\n`
           section.lines.forEach((line) => {
@@ -457,7 +522,7 @@ function App() {
           })
           md += '\n'
         })
-      } else {
+      } else if (finalConclusion) {
         md += `${finalConclusion}\n\n`
       }
     }
@@ -629,6 +694,55 @@ function App() {
 
                 {orchestrationDebug ? (
                   <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-2">
+                        <p className="text-xs text-slate-500">実行モード</p>
+                        <p className="text-slate-100">
+                          {EXECUTION_MODE_METADATA[orchestrationDebug.executionMode]?.label ?? orchestrationDebug.executionMode}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-2">
+                        <p className="text-xs text-slate-500">収束判定</p>
+                        <p className="text-slate-100">
+                          {orchestrationDebug.convergenceDecision?.readyToConclude ? '結論可能' : '継続'}
+                          {' / conf '}
+                          {orchestrationDebug.convergenceDecision?.confidence ?? 0}
+                        </p>
+                      </div>
+                    </div>
+
+                    {orchestrationDebug.deliberationState && (
+                      <div className="space-y-2 rounded-lg border border-slate-700/50 bg-slate-800/40 p-3">
+                        <p className="font-semibold text-slate-100">議論状態</p>
+                        <p className="text-xs leading-5 text-slate-400">
+                          合意度: {orchestrationDebug.deliberationState.consensus.level} / 100 -{' '}
+                          {orchestrationDebug.deliberationState.consensus.summary}
+                        </p>
+                        <p className="text-xs leading-5 text-slate-400">
+                          状態: {orchestrationDebug.deliberationState.convergence.status} /{' '}
+                          {orchestrationDebug.deliberationState.convergence.reason}
+                        </p>
+                        <p className="text-xs leading-5 text-slate-400">
+                          次の焦点: {orchestrationDebug.deliberationState.convergence.recommendedNextFocus ?? '未指定'}
+                        </p>
+                        <div className="space-y-1 text-xs leading-5 text-slate-400">
+                          <p>未解決論点: {orchestrationDebug.deliberationState.openIssues.join(' / ') || 'なし'}</p>
+                          <p>根拠不足: {orchestrationDebug.deliberationState.evidenceGaps.join(' / ') || 'なし'}</p>
+                          <p>対立点: {orchestrationDebug.deliberationState.disagreements.join(' / ') || 'なし'}</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {orchestrationDebug.convergenceDecision && (
+                      <div className="space-y-1 rounded-lg border border-slate-700/50 bg-slate-800/40 p-3">
+                        <p className="font-semibold text-slate-100">終了理由</p>
+                        <p className="text-xs leading-5 text-slate-400">{orchestrationDebug.convergenceDecision.reason}</p>
+                        <p className="text-xs leading-5 text-slate-400">
+                          残課題: {orchestrationDebug.convergenceDecision.remainingIssues.join(' / ') || 'なし'}
+                        </p>
+                      </div>
+                    )}
+
                     <div className="space-y-2">
                       <p className="font-semibold text-slate-100">エージェント別 CLI セッション</p>
                       {orchestrationDebug.agentSessions.length > 0 ? (
@@ -747,13 +861,16 @@ function App() {
                     <div className="min-w-0 flex-1" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                       <p className="truncate text-sm font-semibold text-slate-100">{agent.name}</p>
                       <p className="text-xs text-slate-400">{formatAgentRole(agent.role)}</p>
+                      <p className="mt-1 text-xs text-cyan-200">
+                        視点: {getViewpointRolePreset(agent.viewpointRoleId)?.label ?? '標準'}
+                      </p>
                       <p className="mt-2 text-xs text-slate-300">スタンス: {agent.stance}</p>
                       <p className="mt-1 text-xs text-slate-300">性格: {agent.personality}</p>
                       <p
                         className="mt-2 min-h-[40px] text-xs leading-5 text-slate-500"
                         style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
                       >
-                        {agent.provider === 'codex' ? 'Codex CLI' : agent.provider === 'gemini' ? 'Gemini CLI' : 'GitHub Copilot CLI'} / {agent.model}
+                        {PROVIDER_LABELS[agent.provider]} / {agent.model}
                       </p>
                     </div>
                   </div>
@@ -889,7 +1006,7 @@ function App() {
                 <div>
                   <p className="text-xl font-medium text-slate-300">議題を入力してマルチ CLI 会話を開始してください。</p>
                   <p className="mt-2 text-sm text-slate-500">
-                    Codex CLI / Gemini CLI / GitHub Copilot CLI を混在させて議論できます。
+                    Codex CLI / Gemini CLI / GitHub Copilot CLI / Claude Code を混在させて議論できます。
                   </p>
                 </div>
               </div>
@@ -1107,7 +1224,7 @@ function App() {
             </div>
           )}
 
-          {finalConclusion && (
+          {(finalConclusionStructured || finalConclusion) && (
             <section className="glass-panel mt-5 mb-1 shrink-0 rounded-2xl border-t-4 border-cyan-500 bg-slate-800/80 p-6 shadow-2xl shadow-cyan-900/20">
               <div className="mb-4 flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
@@ -1129,8 +1246,20 @@ function App() {
                 </button>
               </div>
 
+              {finalConclusionStructured && (
+                <div className="mb-5 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h4 className="text-lg font-semibold text-emerald-200">{finalConclusionStructured.title}</h4>
+                    <span className="rounded-full border border-emerald-400/30 px-3 py-1 text-xs font-medium text-emerald-200">
+                      信頼度 {finalConclusionStructured.confidence.score} / 100
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-emerald-100/90">{finalConclusionStructured.confidence.reason}</p>
+                </div>
+              )}
+
               <div className="space-y-5">
-                {conclusionSections.map((section) => (
+                {(finalConclusionStructured ? structuredConclusionSections : conclusionSections).map((section) => (
                   <section
                     key={section.title}
                     className="rounded-2xl border border-slate-700/50 bg-slate-900/30 p-5 shadow-lg shadow-slate-950/20"

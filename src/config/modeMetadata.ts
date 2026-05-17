@@ -13,9 +13,9 @@ export const EXECUTION_MODE_METADATA: Record<ExecutionMode, {
   },
   autonomous: {
     label: 'Autonomous モード',
-    shortDescription: '完全自律で議論を進める将来モード',
-    longDescription: 'Autonomous モードでは、将来的にエージェント自身が発言順、論点整理、収束判断まで主体的に進めます。現時点では未実装です。',
-    badge: '未実装'
+    shortDescription: 'Conversation で各エージェントが発言・待機・質問・批判・結論を自律選択',
+    longDescription: 'Autonomous モードでは、Conversation スタイルに限り各エージェントが speak / wait / ask / critique / conclude を提案し、サーバーが安全柵つきで採用します。Meeting スタイルでは現時点で Orchestration にフォールバックします。',
+    badge: 'Conversation MVP'
   }
 }
 

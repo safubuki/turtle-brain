@@ -1,119 +1,265 @@
 # Turtle Brain Orchestration / Autonomous ガイド
 
+更新日: 2026-05-17
+
 ## このガイドの目的
 
-このガイドは、`Orchestration` と将来の `Autonomous` をどう捉えるか、Turtle Brain が会話をどう回しているかを、実装に沿って短く整理したものです。特に次の 3 点を分けて理解できるようにしています。
+このガイドは、Turtle Brain の `Orchestration` と `Autonomous` を、実装状態と今後の仕様追加の両方を踏まえて整理するためのものです。
 
-- `実行モード`: 誰が全体進行を制御するか
+特に次の 4 点をひと目で理解できるようにします。
+
+- `実行モード`: 誰が全体進行を主導するか
 - `議論スタイル`: どんな会話形式で進めるか
-- `エージェントの役割`: オーケストレータ、ファシリテータ、参加者が何を担当するか
+- `現在の実装`: いま本当に動いているものは何か
+- `次段階の追加仕様`: 0516 時点で何を足すと「より良い答え」に近づくか
 
-## まず整理
+## 先に結論
+
+- 現在の標準モードは `Orchestration` です
+- `Conversation` と `Meeting` は実装済みです
+- `Autonomous × Conversation` は最小実装済みです
+- `Autonomous × Meeting` は将来フェーズであり、現時点では Orchestration × Meeting へフォールバックします
+- `議論状態`, `収束判定`, `構造化結論` は 2026-05-16 追加仕様として実装済みです
+
+## まず 2 軸で整理する
 
 ### 実行モード
 
-- `Orchestration`: オーケストレータが各ターンの進行、発言者選定、メッセージ配送、最終集約を管理する現在の標準モードです。
-- `Autonomous`: 将来モードです。エージェント自身がより主体的に進行し、中央制御を薄くする想定です。現時点では未実装です。
+- `Orchestration`: オーケストレータが各ターンの進行、発言者選定、メッセージ配送、最終集約を管理する現在の標準モードです
+- `Autonomous`: エージェント自身の行動提案をサーバー側の安全柵で集約するモードです。現時点では Conversation の MVP を実装済みです
 
 ### 議論スタイル
 
-- `Conversation`: 2 名が交互に会話します。ファシリテータも挙手判定も使いません。
-- `Meeting`: 複数エージェントで会議します。ファシリテータが論点整理を行い、オーケストレータが次話者を選びます。
+- `Conversation`: 2 名が交互に会話します。ファシリテータも挙手判定も使いません
+- `Meeting`: 複数エージェントで会議します。ファシリテータが論点整理を行い、オーケストレータが次話者を選びます
+
+### 組み合わせの現状
+
+| 実行モード | Conversation | Meeting |
+| --- | --- | --- |
+| Orchestration | 実装済み | 実装済み |
+| Autonomous | MVP 実装済み | Orchestration へフォールバック |
 
 ## 役割の違い
 
 ### オーケストレータ
 
-- 各ターンの開始と終了を管理します。
-- `run-turn` API を受けて、そのターンに誰が話すか最終決定します。
-- 会話ログを各エージェントへ配り、`mailbox` を更新します。
-- ターン上限に達したら最終結論を生成します。
+- 各ターンの開始と終了を管理します
+- `run-turn` API を受けて、そのターンに誰が話すか最終決定します
+- 会話ログを各エージェントへ配り、`mailbox` を更新します
+- 現状はターン上限に達したら最終結論を生成します
+- 2026-05-16 実装後は `議論状態の更新`, `収束判定`, `構造化結論生成` も担います
 
 ### ファシリテータ
 
-- `Meeting` のときだけ使います。
-- 会議の現状整理、次の焦点、誰に話してほしいかを提案します。
-- ただし最終的な発言者決定はファシリテータ単独ではなく、オーケストレータが公平性補正を入れて決めます。
+- `Meeting` のときだけ使います
+- 会議の現状整理、次の焦点、誰に話してほしいかを提案します
+- ただし最終的な発言者決定はファシリテータ単独ではなく、オーケストレータが公平性補正を入れて決めます
+- 将来の Autonomous × Meeting では、進行の主役をよりファシリテータ寄りにするのが自然です
 
 ### 参加者
 
-- 直近の発言、ファシリテータの整理、自分のスタンス、性格を踏まえて自然な 1 発言を返します。
-- 自分専用の `runtimeSessionId` を持つため、各 AI は自分の会話文脈を持続できます。
+- 直近の発言、ファシリテータの整理、自分のスタンス、性格を踏まえて自然な 1 発言を返します
+- 自分専用の `runtimeSessionId` を持つため、各 AI は自分の会話文脈を持続できます
+- 将来の Autonomous では、単に話すだけでなく `話す / 待つ / 問う / 批判する / 結論へ進む` を選べるようにします
 
-## 今回の高速化で何を変えたか
+## 現在の実装が実際にやっていること
 
-今回の意図は、`Meeting` の自然な会話テイストを壊さずに、発言者選定の待ち時間だけを減らすことでした。現在の実装では、通常の `Orchestration + Meeting` は次のように動きます。
+### Orchestration × Conversation
 
-- 進行役 AI への 1 回のメタ判定で、`participantScores`、`selectedAgentIds`、`nextFocus`、`parallelDispatch` をまとめて返します。
-- その結果を受けて、オーケストレータが公平性補正を加えて最終的な発言者を決めます。
-- そのため、設定画面から `発言者選定方式` の選択肢は外し、通常の `Meeting` はこの AI 判定経路を使う前提にしました。
-- 以前のように、参加者ごとに別々の採点用 AI 呼び出しを並べる通常経路は使いません。
-- 発言そのものの生成は従来どおり各エージェントの本来のセッションで行うため、会話の流れは保たれます。
-- 採点や司会判断のためのメタ判定は別セッションで行うため、本発話用の会話履歴を汚しません。
+- 2 名の参加者が交互に話します
+- 直前の話者と異なる参加者を選ぶシンプルな制御です
+- 相手の直近発言、最近の会話、自分の過去発言、inbox を prompt に入れます
+- 2〜4 文程度の自然な返答を促します
+- まだ「十分に妥当な答えに近づいたか」は判断していません
 
-### Meeting での最終判断は誰がするか
+### Orchestration × Meeting
 
-`Meeting` では「ファシリテータが全部決める」わけではありません。実際には次の 2 段階です。
+- 初回はファシリテータが導入と論点整理を行います
+- 2 ターン目以降は AI メタ判定またはルールベース評価で発話者候補を出します
+- オーケストレータが公平性補正と直近発話ペナルティを加えて最終的な話者を決めます
+- 必要ならファシリテータ自身が介入し、必要なら複数参加者を同時に選ぶこともできます
 
-1. ファシリテータ AI が「今の会議状況の整理」と「誰が話すべきかの提案」を返す
-2. オーケストレータがそれを受けて、公平性補正や直近発話ペナルティを加えて実際の話者を選ぶ
+### 現在の Diagnostics
 
-オーケストレータが見ている代表的な要素は次のとおりです。
+現在の Diagnostics では次の情報が見えます。
 
-- 進行役 AI が返した参加者ごとの発言必要度
-- 進行役 AI が明示的に指名した参加者
-- 発言回数の偏り
-- 直前に話したばかりかどうか
-- 進行役自身が介入すべき優先度
+- sessionId
+- 各エージェントの runtimeSessionId
+- dispatch reason
+- facilitator の整理と理由
+- participant score
+- worker 実行時間
+- mailbox 状態
+- deliberationState
+- convergenceDecision
+- structured conclusion confidence
+- 最新ログ
 
-このため、現在の `Meeting` は「完全ルールベース」でも「完全にファシリテータ任せ」でもなく、`AI の判断 + オーケストレータの進行制御` です。
+`openIssues`, `evidenceGaps`, `consensus`, `convergence`, `structured conclusion confidence` を Diagnostics で確認できるため、会話量だけでなく議論品質の進行も追えます。
+
+## 2026-05-16 実装前の限界
+
+0516 の仕様追加が必要になった理由は、主に次の 5 点です。
+
+### 1. executionMode がバックエンド契約に入っていない
+
+フロントには `executionMode` がありますが、run-turn API にはまだ送っていません。そのためサーバは実質 `discussionStyle` のみで分岐しています。
+
+### 2. 議論状態モデルがない
+
+現在は `messages` と `log` はありますが、次を構造的に持っていません。
+
+- 現在の論点
+- 主張一覧
+- 反対意見
+- 未解決事項
+- 根拠不足
+- 合意レベル
+- 収束状態
+- 次に検証すべき論点
+
+### 3. 終了条件が固定ターン中心
+
+今は基本的に `turnLimit × agent数` で終わります。これは安全ですが、答えがもう出ていても続き、まだ足りなくても終わります。
+
+### 4. 最終結論が自由文
+
+いまの最終結論は読みやすい一方、見出し揺れに弱く、UI と Markdown export とテストの安定性が低いです。
+
+### 5. 話者選定が公平性中心
+
+現在の Meeting は、発話回数の偏り、スコア、ファシリテータ指名を中心に次話者を決めています。これでは「未解決論点を潰すために誰を呼ぶか」という判断が弱いです。
+
+## 2026-05-16 で追加した考え方
+
+### executionMode を正式な API 契約にする
+
+まず `executionMode` をフロントからサーバへ通し、セッションに保持します。これで `Orchestration` と `Autonomous` を本当に別物として扱えるようになります。
+
+```ts
+type ExecutionMode = 'orchestration' | 'autonomous'
+```
+
+### StructuredFinalConclusion を導入する
+
+最終結論は自由文ではなく JSON schema を正とします。表示や export は structured を優先し、parse 失敗時だけ自由文へ fallback します。
+
+```ts
+interface StructuredFinalConclusion {
+  schemaVersion: 1
+  title: string
+  conclusionSummary: string
+  finalAnswer: string
+  reasoning: string[]
+  supportingPoints: string[]
+  counterArguments: string[]
+  unresolvedIssues: string[]
+  risks: string[]
+  confidence: {
+    score: number
+    reason: string
+  }
+  nextActions: Array<{
+    label: string
+    detail: string
+    priority: 'high' | 'medium' | 'low'
+  }>
+}
+```
+
+### DeliberationState を導入する
+
+議論の内部状態を持つことで、「会話が続いた」ではなく「答えが改善した」を追えるようにします。
+
+```ts
+interface DeliberationState {
+  agenda: string[]
+  claims: Array<{
+    id: string
+    text: string
+    supportLevel: 'weak' | 'medium' | 'strong'
+    challengedBy: string[]
+  }>
+  openIssues: string[]
+  disagreements: string[]
+  evidenceGaps: string[]
+  consensus: {
+    level: number
+    summary: string
+  }
+  convergence: {
+    status: 'exploring' | 'debating' | 'needs_verification' | 'ready_to_conclude' | 'blocked'
+    reason: string
+    confidence: number
+    recommendedNextFocus: string | null
+  }
+}
+```
+
+### ConvergenceDecision を導入する
+
+固定ターンだけではなく、議論の状態で終了判断できるようにします。
+
+```ts
+interface ConvergenceDecision {
+  readyToConclude: boolean
+  confidence: number
+  reason: string
+  remainingIssues: string[]
+  nextFocus: string | null
+}
+```
+
+### AutonomousAction を導入する
+
+Autonomous × Conversation の最小実装では、各エージェントが行動を提案し、サーバが安全柵付きで集約します。
+
+```ts
+interface AutonomousAction {
+  agentId: string
+  action: 'speak' | 'wait' | 'ask' | 'critique' | 'conclude'
+  reason: string
+  message: string
+  confidence: number
+}
+```
+
+## 次段階のモードごとの姿
+
+### Orchestration はどう変わるか
+
+2026-05-16 実装後の Orchestration は、単に順番を回すだけでなく、次の仕事も持ちます。
+
+- deliberationState を更新する
+- convergence を判定する
+- unresolved issue と evidence gap をもとに話者を選ぶ
+- structured final conclusion を生成する
+
+つまり `会話を回すオーケストレータ` から、`議論品質を制御するオーケストレータ` へ進化させます。
+
+### Autonomous × Conversation はどう作るか
+
+次に実装すべき Autonomous は、まず Conversation に限定するのが安全です。
+
+- 各エージェントは `speak / wait / ask / critique / conclude` を返す
+- サーバが空応答、重複応答、同一エージェント連続発話、同じ論点反復を抑止する
+- `conclude` が強いときは convergence 判定へ進む
+
+ここでは「完全放任」ではなく、`自律提案 + サーバ安全柵` の構成にします。
+
+### Autonomous × Meeting はどう考えるか
+
+Autonomous × Meeting は、現時点では将来フェーズです。自然な姿は次のとおりです。
+
+- ファシリテータが進行の主役を担う
+- 参加者は発話意図の強弱を持つ
+- Session Kernel は共有ログ、mailbox、衝突通知、停滞観測などの基盤に徹する
+- 中央が毎回「次は誰」と決める司令塔にならない
 
 ## シーケンス図
 
-### Orchestration + Conversation
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as User
-    participant UI as Frontend / App
-    participant Store as useStore
-    participant API as Backend API
-    participant Orch as MeetingOrchestrator
-    participant A as Agent A CLI
-    participant B as Agent B CLI
-    participant Syn as Synthesizer CLI
-
-    User->>UI: テーマを入力して開始
-    UI->>Store: startSession(topic)
-
-    loop 各ターン
-        UI->>Store: processNextTurn()
-        Store->>API: POST /api/orchestrator/run-turn
-        API->>Orch: runTurn()
-        Orch->>Orch: 交互発話ロジックで次話者を選ぶ
-        alt Agent A の番
-            Orch->>A: runCli(prompt, sessionId)
-            A-->>Orch: 発話 + sessionId
-        else Agent B の番
-            Orch->>B: runCli(prompt, sessionId)
-            B-->>Orch: 発話 + sessionId
-        end
-        Orch->>Orch: recordMessage / deliverMessage / debug 更新
-        Orch-->>API: messages, agents, currentTurn
-        API-->>Store: レスポンス
-        Store-->>UI: 画面更新
-    end
-
-    UI->>Store: 次ターン要求
-    Store->>API: POST /api/orchestrator/run-turn
-    API->>Orch: finalizeSession()
-    Orch->>Syn: 最終結論の生成
-    Syn-->>Orch: finalConclusion
-    Orch-->>UI: セッション完了
-```
-
-### Orchestration + Meeting
+### 現在の Orchestration + Meeting
 
 ```mermaid
 sequenceDiagram
@@ -176,18 +322,7 @@ sequenceDiagram
     Orch-->>UI: セッション完了
 ```
 
-### Autonomous モードの想定シーケンス
-
-以下は将来構想です。現時点では未実装であり、実際のコードはまだありません。
-
-ここで重要なのは、中央の存在を `隠れたオーケストレータ` と見なさないことです。  
-もし将来このモードを実装するなら、中央の存在は `誰が話すかを決める司令塔` ではなく、`会議室の基盤` に近い役割に留めるのが自然です。
-
-- `Session Kernel`: 会議の土台です。共有メモリ、mailbox、発話中フラグ、衝突通知、ログ保存などを担当します。
-- `Facilitator`: 会議を回す主体です。誰に先に話してもらうか、停滞時にどう促すか、話しすぎをどう抑えるかを判断します。
-- `Participants`: 自分のスタンス、性格、直近の会話、会議の勢いを見て、自律的に発言意図を出します。
-
-つまり Autonomous は、`中央が判断する会議` ではなく、`ファシリテータと参加者が主役で、基盤は交通整理だけをする会議` を目指すものです。
+### 次段階の Orchestration: 議論収束基盤つき
 
 ```mermaid
 sequenceDiagram
@@ -195,153 +330,125 @@ sequenceDiagram
     actor User as User
     participant UI as Frontend / App
     participant API as Backend API
-    participant Kernel as Session Kernel
-    participant Room as Shared Room State
-    participant Fac as Facilitator Agent
-    participant A as Participant A
-    participant B as Participant B
-    participant C as Participant C
-    participant Syn as Synthesizer CLI
+    participant Orch as MeetingOrchestrator
+    participant State as DeliberationState
+    participant FacMeta as Facilitator Meta AI
+    participant Agent as Selected Agent CLI
+    participant Syn as Structured Synthesizer
 
-    User->>UI: テーマを入力して開始
-    UI->>API: セッション開始
-    API->>Kernel: autonomous session start
-    Kernel->>Room: 初期状態を作成
-
-    loop 議論中
-        par 参加者が自律的に様子を見る
-            A->>Room: 発言意図 or 様子見
-        and
-            B->>Room: 発言意図 or 様子見
-        and
-            C->>Room: 発言意図 or 様子見
-        end
-
-        Room-->>Fac: 活発 / 停滞 / 発言偏り / 衝突兆候
-        Fac->>Room: A を先に促す、B は次に、C は待機
-        Kernel->>A: 発話トークンを付与
-        A-->>Kernel: 発話
-        Kernel->>Room: ログと会議状態を更新
-
-        alt B が途中で割り込みたがる
-            B->>Room: 割り込み意図
-            Room-->>Fac: 発話競合を通知
-            Fac->>Room: まずは A、次に B と整理
-            Kernel->>B: 少し待機
-        end
-
-        alt 誰かが話しすぎる
-            Room-->>Fac: 発言偏りを通知
-            Fac->>Room: 発言抑制、静かな参加者へ促し
-        end
-
-        alt 会議が停滞する
-            Room-->>Fac: 停滞状態
-            Fac-->>Kernel: 論点整理の進行発話
-            Kernel->>Room: 状態更新
-        end
-
-        Kernel-->>UI: ログ更新
+    User->>UI: 議論開始
+    UI->>API: run-turn(executionMode, discussionStyle)
+    API->>Orch: runTurn()
+    Orch->>State: updateDeliberationState()
+    State-->>Orch: openIssues / evidenceGaps / consensus / convergence
+    Orch->>FacMeta: unresolved issue と next focus を含めて判定依頼
+    FacMeta-->>Orch: recommended speaker + recommended next focus
+    Orch->>Orch: 論点解消寄りに最終話者を決定
+    Orch->>Agent: meeting or conversation prompt
+    Agent-->>Orch: 発話
+    Orch->>State: 再更新
+    Orch->>Orch: evaluateConvergence()
+    alt 収束済み
+        Orch->>Syn: structured final conclusion を依頼
+        Syn-->>Orch: StructuredFinalConclusion
     end
-
-    Fac->>Syn: 最終集約を依頼
-    Syn-->>Fac: finalConclusion
-    Kernel-->>UI: セッション完了
+    Orch-->>UI: messages + debug + deliberationState + structured conclusion
 ```
 
-## Orchestration と Autonomous の違い
+### Autonomous × Conversation MVP
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User
+    participant UI as Frontend / App
+    participant API as Backend API
+    participant Orch as Session Runner
+    participant A as Agent A
+    participant B as Agent B
+    participant State as DeliberationState
+
+    User->>UI: Autonomous Conversation を開始
+    UI->>API: run-turn(executionMode=autonomous)
+    API->>Orch: runAutonomousConversationTurn()
+    Orch->>A: AutonomousAction を要求
+    Orch->>B: AutonomousAction を要求
+    A-->>Orch: speak / wait / ask / critique / conclude
+    B-->>Orch: speak / wait / ask / critique / conclude
+    Orch->>Orch: 安全柵で action を集約
+    Orch->>State: deliberationState を更新
+    Orch->>Orch: convergence を判定
+    Orch-->>UI: 採用された発話 + debug + state
+```
+
+## Diagnostics をどう読むとよいか
+
+### 現在見えているもの
+
+- sessionId: セッション識別子
+- runtimeSessionId: 各 CLI の継続文脈
+- dispatch reason: なぜこの話者になったか
+- facilitator: 会議整理の要約
+- scores: 挙手や発話必要度
+- workers: どこでどれだけ時間を使ったか
+
+### 2026-05-16 実装で追加されたもの
+
+- `openIssues`: まだ解消されていない論点
+- `evidenceGaps`: 根拠が不足している点
+- `disagreements`: 争点の残り
+- `consensus.level`: どこまで合意したか
+- `convergence.status`: いま探索中か、検証中か、結論準備完了か
+- `recommendedNextFocus`: 次に詰めるべき論点
+- `structured conclusion confidence`: 最終答えの確からしさ
+
+## 2026-05-16 実装済みメモ
+
+- `executionMode` は frontend payload、`RunTurnRequest`、`MeetingSession`、debug response に通しています
+- 最終結論は `StructuredFinalConclusion` を優先し、parse 失敗時のみ従来の自由文表示へ fallback します
+- 各ターン後に `DeliberationState` を更新し、Diagnostics に未解決論点、根拠不足、対立点、合意度、収束状態を表示します
+- `evaluateConvergence` が `readyToConclude && confidence >= 70` を満たす場合、turnLimit 前でも structured final conclusion を生成します
+- Meeting の話者選定は、発話回数だけでなく未解決論点、根拠不足、批判・検証・統合の desiredAction を加味します
+- Autonomous × Conversation は `AutonomousAction` を各参加者から受け取り、空応答、重複、連続発話を抑制しながら採用発話を決めます
+- `lint:app`, `typecheck:app`, `typecheck:server`, `test:server` を追加し、server 側に構造化結論と Autonomous Conversation の回帰テストを置いています
+
+## Orchestration と Autonomous の違いをひとことで言うと
 
 ### Orchestration
 
-- 中央のオーケストレータが毎ターン必ず介入します。
-- 誰が話すかの最終決定権はオーケストレータ側にあります。
-- `Meeting` ではファシリテータ AI は提案者であり、進行そのものはオーケストレータが管理します。
+- 中央のオーケストレータが毎ターン必ず介入します
+- 誰が話すかの最終決定権はオーケストレータ側にあります
+- 品質向上版では、議論状態と収束判定も中央が管理します
 
 ### Autonomous
 
-- 中央制御を薄くし、各エージェントの自律判断を主役にする想定です。
-- ファシリテータが人間の会議に近い形で交通整理を担い、基盤側はログ保存や衝突通知などの下支えに寄ります。
-- 進行順や収束判断を、より分散的に決めます。
-- 実装方針としては、`会議 OS が強く制御する` から `複数 AI と進行役が相互調整する` へ寄せるイメージです。
+- 各エージェントの自律判断を主役にします
+- ただし完全放任ではなく、サーバ側が安全柵を持ちます
+- 会議形式まで進める場合は、ファシリテータと Session Kernel の役割分離が重要になります
 
-## Autonomous をどう捉えると自然か
+## 最後に
 
-`Autonomous` を自然に理解するには、`裏の実行者` ではなく、`会議室そのものに近い基盤` と考えるのがよいです。
+いまの Turtle Brain は、`完全自律会議` ではなく、`オーケストレータ付きの半自律会議` です。ここに 0516 の仕様を加えることで、Turtle Brain は「会話ログ生成アプリ」から、「議論を収束させて答えの品質を上げる思考オーケストレーター」へ進みやすくなります。
 
-### これは違う
+## 2026-05-17 追加: 視点ロール簡易設定
 
-- 見えないオーケストレータが、裏で毎回「次は誰」と決める
-- 中央の基盤が会議の意味や方向性を支配する
+エージェントには、従来の `stance` と `personality` に加えて `viewpointRoleId`, `viewpointFocus`, `viewpointAvoid` を持たせる。
 
-### こう考えると近い
+目的は、ユーザーが細かな性格設計をしなくても、会社組織上の代表的な視点から会話を開始できるようにすること。
 
-- 会議室には空気がある
-- 今は活発か、停滞気味か、少し荒れているかがある
-- 誰かが被せ気味に話そうとしたら、進行役が制する
-- 誰かが話しすぎたら、進行役が別の人に振る
-- でも会議内容そのものは参加者とファシリテータが作る
+標準プリセットは次の 10 種類。
 
-ただしソフトウェアでは、空気感だけでは足りません。実際には最低限の基盤が必要です。
+- 経営・事業責任
+- 現場・業務運用
+- プロジェクト推進
+- 顧客・利用者
+- 営業・市場
+- 技術・専門実務
+- 財務・経理
+- 人事・組織
+- 法務・コンプライアンス・知財
+- セキュリティ・リスク管理
 
-- 共有ログ
-- mailbox
-- 発話中かどうかの状態
-- 割り込みや衝突の検知
-- 停滞や偏りの観測
-- 終了条件の保持
+会話プロンプトでは、各エージェントに `Viewpoint role`, `Primary viewpoint focus`, `Avoid over-biasing toward` を渡す。ファシリテータと最終結論生成では、各参加者の視点ロールを明示し、視点差分が分かる形で論点・懸念・推奨アクションを整理する。
 
-この最低限の基盤を、ここでは `Session Kernel` と呼んでいます。  
-重要なのは、この Kernel は `判断主体` ではなく `会議の土台` であることです。
-
-## 将来の Autonomous の設計方針としてよさそうなもの
-
-ご提案の方向性はかなり筋が良いです。特に次の考え方は、`Autonomous` を `Orchestration` ときれいに差別化できます。
-
-### 1. 進行の主役はファシリテータに寄せる
-
-- 発話順の最終整理
-- 被りそうなときの仲裁
-- 停滞時の再始動
-- 話しすぎへの注意
-- 静かな参加者への促し
-
-これはまさに人間の会議に近いです。
-
-### 2. 参加者は「発話要求」を持つ
-
-参加者は毎回必ず話すのではなく、内部的に次のような状態を持つと自然です。
-
-- 今すぐ言いたい
-- もう少し様子を見る
-- 今の議論には乗りたい
-- いったん引く
-- 今は割り込むほどではない
-
-この差が、性格やスタンスの違いとして出ます。
-
-### 3. 空気感は共有状態として持つ
-
-ご指摘の `活発 / 停滞 / 順調` はとても重要です。  
-これは `Autonomous` の本質にかなり近く、以下のような共有状態として持つとよいです。
-
-- activityLevel: 活発 / 通常 / 停滞
-- contentionLevel: 被り気味 / 安定
-- balanceLevel: 特定話者に偏っているか
-- convergenceLevel: 収束に向かっているか
-
-ただし、これを見て実際にどう振る舞うかはファシリテータや参加者が決めるべきで、Kernel が決めるべきではありません。
-
-### 4. キューは強すぎない方がよい
-
-ここも完全に同意です。  
-厳密な FIFO キューにすると、人間らしい会議のゆらぎが消えます。将来の Autonomous は次の程度が自然です。
-
-- 完全キューイングではなく `発言意図の強弱`
-- 割り込みは可能だが、ファシリテータが抑制できる
-- 少し待つ、今は見る、後で戻る、を許容する
-- 発言ペナルティは hard stop ではなく、進行役の注意や選出抑制で効かせる
-
-## いまの Turtle Brain をひとことで言うと
-
-現在の Turtle Brain は、`完全自律会議` ではなく、`オーケストレータ付きの半自律会議` です。  
-会話の自然さは各 AI の発話生成に任せつつ、進行の破綻防止と公平性の維持はオーケストレータが引き受けています。
+標準プリセット自体は固定し、ユーザー編集はエージェント単位の `重視する観点` と `避ける振る舞い` で行う。将来的に必要になった場合のみ、プリセットの複製保存やカスタム視点ライブラリを追加する。

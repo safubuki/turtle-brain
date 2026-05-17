@@ -10,7 +10,9 @@ import {
   ROLE_LABELS,
   STANCE_PRESETS,
   STANCE_VALUE_ALIASES,
+  VIEWPOINT_ROLE_PRESETS,
   appendSelectableValue,
+  getViewpointRolePreset,
   normalizeSelectableValue,
   parseSelectableValue,
   toggleSelectableValue
@@ -30,7 +32,7 @@ interface SettingsModalProps {
 }
 
 interface ProviderInstallSpec {
-  provider: 'codex' | 'gemini' | 'copilot'
+  provider: AgentProfile['provider']
   label: string
   displayCommand: string
 }
@@ -56,6 +58,37 @@ interface SelectionPanelProps {
 }
 
 const ALL_PROVIDERS = Object.keys(PROVIDER_LABELS) as AgentProfile['provider'][]
+const DEFAULT_VIEWPOINT_SEQUENCE: Array<NonNullable<AgentProfile['viewpointRoleId']>> = [
+  'executive-business',
+  'customer-user',
+  'operations',
+  'project-management',
+  'technical-practice',
+  'finance-accounting'
+]
+
+function getDefaultViewpointRoleId(index: number): NonNullable<AgentProfile['viewpointRoleId']> {
+  return DEFAULT_VIEWPOINT_SEQUENCE[Math.max(0, index - 1) % DEFAULT_VIEWPOINT_SEQUENCE.length]
+}
+
+function getViewpointRoleAgentUpdates(roleId: AgentProfile['viewpointRoleId']): Partial<AgentProfile> {
+  const preset = getViewpointRolePreset(roleId)
+  if (!preset) {
+    return {
+      viewpointRoleId: null,
+      viewpointFocus: '',
+      viewpointAvoid: ''
+    }
+  }
+
+  return {
+    viewpointRoleId: preset.id,
+    stance: preset.defaultStance,
+    personality: preset.defaultPersonality,
+    viewpointFocus: preset.defaultFocus,
+    viewpointAvoid: preset.defaultAvoid
+  }
+}
 
 function getProviderFallbackModel(provider: AgentProfile['provider']): string {
   switch (provider) {
@@ -63,6 +96,8 @@ function getProviderFallbackModel(provider: AgentProfile['provider']): string {
       return 'gemini-2.5-flash'
     case 'copilot':
       return 'gpt-5.2'
+    case 'claude':
+      return 'sonnet'
     default:
       return 'gpt-5.4'
   }
@@ -75,12 +110,16 @@ function createNewAgent(
 ): AgentProfile {
   const nextLetter = String.fromCharCode(64 + Math.min(index, 26))
   const model = getProviderInitialModel(catalog, getProviderFallbackModel(provider))
+  const viewpointPreset = getViewpointRolePreset(getDefaultViewpointRoleId(index))
   return {
     id: `agent-${Date.now()}`,
     name: `エージェント${nextLetter}`,
     role: 'Participant',
     stance: '中立・合意形成重視',
     personality: '丁寧・堅実',
+    viewpointRoleId: viewpointPreset?.id ?? null,
+    viewpointFocus: viewpointPreset?.defaultFocus ?? '',
+    viewpointAvoid: viewpointPreset?.defaultAvoid ?? '',
     avatarPreset: getDefaultBuiltInAgentIcon(Math.max(0, index - 1)),
     avatarCustomDataUrl: null,
     avatarCustomName: null,
@@ -317,9 +356,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   const [customInputs, setCustomInputs] = useState<Record<string, string>>({})
   const [openPanel, setOpenPanel] = useState<{ agentId: string; type: 'stance' | 'personality' } | null>(null)
-  const [installSpecs, setInstallSpecs] = useState<Record<'codex' | 'gemini' | 'copilot', ProviderInstallSpec> | null>(null)
+  const [installSpecs, setInstallSpecs] = useState<Record<AgentProfile['provider'], ProviderInstallSpec> | null>(null)
   const [installRuntime, setInstallRuntime] = useState<ProviderInstallRuntimeStatus | null>(null)
-  const [installBusyProvider, setInstallBusyProvider] = useState<'codex' | 'gemini' | 'copilot' | null>(null)
+  const [installBusyProvider, setInstallBusyProvider] = useState<AgentProfile['provider'] | null>(null)
   const [installFeedback, setInstallFeedback] = useState<string | null>(null)
 
   useEffect(() => {
@@ -354,7 +393,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       try {
         const data = await apiRequestJson<{
           success?: boolean
-          providers?: Record<'codex' | 'gemini' | 'copilot', ProviderInstallSpec>
+          providers?: Record<AgentProfile['provider'], ProviderInstallSpec>
           runtime?: ProviderInstallRuntimeStatus
         }>('/api/providers/install-info')
 
@@ -381,9 +420,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     ? ALL_PROVIDERS.filter((provider) => providerCatalogs[provider]?.available)
     : []
   const hasAnyProviderInstalled = isProviderSelectionReady && availableProviders.length > 0
-  const canAutoInstall = installRuntime?.npmAvailable ?? true
-  const shouldRequireNodeSetup = !canAutoInstall && !hasAnyProviderInstalled
-  const shouldShowBaseSetupGuide = isProviderSelectionReady && !hasAnyProviderInstalled && !canAutoInstall
+  const canUseNpmInstaller = installRuntime?.npmAvailable ?? true
+  const providerRequiresNodeSetup = (provider: AgentProfile['provider']) => provider !== 'claude' && !canUseNpmInstaller
+  const shouldShowBaseSetupGuide =
+    isProviderSelectionReady &&
+    !hasAnyProviderInstalled &&
+    !canUseNpmInstaller &&
+    ALL_PROVIDERS.every((provider) => providerRequiresNodeSetup(provider))
   const getCustomKey = (agentId: string, field: 'stance' | 'personality') => `${agentId}:${field}`
   const setCustomValue = (agentId: string, field: 'stance' | 'personality', value: string) => {
     setCustomInputs((current) => ({ ...current, [getCustomKey(agentId, field)]: value }))
@@ -402,13 +445,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       avatarCustomName: file.name
     })
   }
-  const handleInstallProvider = async (provider: 'codex' | 'gemini' | 'copilot') => {
+  const handleInstallProvider = async (provider: AgentProfile['provider']) => {
     const spec = installSpecs?.[provider]
     if (!spec) {
       return
     }
 
-    if (shouldRequireNodeSetup) {
+    if (providerRequiresNodeSetup(provider)) {
       setInstallFeedback('Node.js のセットアップが必要です。上部の案内を確認してから再試行してください。')
       return
     }
@@ -507,7 +550,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <div className="flex items-center gap-4">
                 <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">CLI 状態</h3>
                 <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
-                  {shouldRequireNodeSetup ? 'Node.js が必要' : 'CLI をインストール'}
+                  {!canUseNpmInstaller ? 'npm 系 CLI は Node.js が必要' : 'CLI をインストール'}
                 </span>
               </div>
               <div className="rounded-full border border-slate-700/60 bg-slate-900/40 px-3 py-1 text-xs text-slate-400">
@@ -539,14 +582,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               </div>
             )}
 
-            <div className="grid gap-3 md:grid-cols-3">
-              {(['codex', 'gemini', 'copilot'] as const).map((provider) => {
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              {ALL_PROVIDERS.map((provider) => {
                 const catalog = providerCatalogs[provider]
                 const isAvailable = catalog?.available ?? false
                 const statusClass = isAvailable
                   ? 'bg-emerald-400 shadow-[0_0_14px_rgba(52,211,153,0.75)]'
                   : 'bg-rose-400 shadow-[0_0_14px_rgba(251,113,133,0.75)]'
                 const spec = installSpecs?.[provider] ?? null
+                const requiresNodeSetup = providerRequiresNodeSetup(provider)
 
                 return (
                   <div key={provider} className="rounded-2xl border border-slate-700/60 bg-slate-900/35 p-4">
@@ -564,7 +608,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       {catalog?.source ? `検出元: ${catalog.source}` : '検出情報なし'}
                     </p>
                     <p className="mt-1 text-xs leading-5 text-slate-500">
-                      {getProviderInstallCardMessage(isAvailable, Boolean(spec), shouldRequireNodeSetup)}
+                      {getProviderInstallCardMessage(isAvailable, Boolean(spec), requiresNodeSetup)}
                     </p>
 
                     {!isAvailable && spec && (
@@ -572,10 +616,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         <button
                           type="button"
                           onClick={() => void handleInstallProvider(provider)}
-                          disabled={installBusyProvider !== null || shouldRequireNodeSetup}
+                          disabled={installBusyProvider !== null || requiresNodeSetup}
                           className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          {installBusyProvider === provider ? 'インストール中...' : shouldRequireNodeSetup ? 'Node.js が必要' : 'インストール'}
+                          {installBusyProvider === provider ? 'インストール中...' : requiresNodeSetup ? 'Node.js が必要' : 'インストール'}
                         </button>
                         <p className="break-all whitespace-pre-wrap rounded-lg border border-slate-700/50 bg-slate-950/40 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
                           {spec.displayCommand}
@@ -623,12 +667,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               </button>
               <button
                 type="button"
-                disabled
-                className="cursor-not-allowed rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3 text-left text-slate-500 opacity-60"
+                onClick={() => setExecutionMode('autonomous')}
+                className={`rounded-xl border px-4 py-3 text-left transition-all ${
+                  executionMode === 'autonomous'
+                    ? 'border-violet-500/50 bg-violet-500/20 text-violet-200'
+                    : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
+                }`}
               >
                 <div className="flex items-center justify-between gap-2">
                   <p className="font-semibold">{EXECUTION_MODE_METADATA.autonomous.label}</p>
-                  <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] tracking-wider text-slate-500">
+                  <span className="rounded-full border border-violet-400/30 px-2 py-0.5 text-[10px] tracking-wider text-violet-200">
                     {EXECUTION_MODE_METADATA.autonomous.badge}
                   </span>
                 </div>
@@ -742,6 +790,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               {agents.map((agent) => {
                 const isFacilitator = agent.role === 'Facilitator'
                 const providerCatalog = providerCatalogs[agent.provider]
+                const viewpointPreset = getViewpointRolePreset(agent.viewpointRoleId)
                 const isCurrentProviderInstalled = providerCatalog?.available ?? false
                 const providerSelectDisabled = !isProviderSelectionReady || availableProviders.length === 0
                 const modelOptions = providerCatalog?.models ?? []
@@ -943,6 +992,80 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </div>
                     </div>
 
+                    <div className="mt-4 space-y-3 rounded-2xl border border-slate-700/50 bg-slate-950/20 p-4">
+                      <div className="grid gap-4 lg:grid-cols-[minmax(220px,0.75fr)_minmax(0,1.25fr)]">
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">視点ロール</label>
+                          <select
+                            value={agent.viewpointRoleId ?? ''}
+                            onChange={(event) => {
+                              const nextRoleId = event.target.value
+                                ? event.target.value as NonNullable<AgentProfile['viewpointRoleId']>
+                                : null
+                              updateAgent(agent.id, getViewpointRoleAgentUpdates(nextRoleId))
+                            }}
+                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
+                          >
+                            <option value="">標準（ロール指定なし）</option>
+                            {VIEWPOINT_ROLE_PRESETS.map((preset) => (
+                              <option key={preset.id} value={preset.id}>
+                                {preset.label}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs leading-5 text-slate-500">
+                            選択すると標準のスタンス・性格・観点を適用します。必要なら下で調整できます。
+                          </p>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="rounded-xl border border-slate-700/50 bg-slate-900/45 px-3 py-3">
+                            <p className="text-sm font-semibold text-slate-100">
+                              {viewpointPreset?.label ?? '標準的な参加者'}
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-slate-400">
+                              {viewpointPreset?.description ?? '特定の職能や部門に寄せず、常識的でバランスのよい観点から会話します。'}
+                            </p>
+                            {viewpointPreset && (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {viewpointPreset.looksAt.map((item) => (
+                                  <span
+                                    key={item}
+                                    className="rounded-full border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1 text-[11px] text-cyan-200"
+                                  >
+                                    {item}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="space-y-1.5">
+                          <span className="text-sm font-medium text-slate-400">重視する観点</span>
+                          <textarea
+                            rows={3}
+                            value={agent.viewpointFocus}
+                            onChange={(event) => updateAgent(agent.id, { viewpointFocus: event.target.value })}
+                            placeholder="この立場で特に見てほしいこと"
+                            className="w-full resize-none rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500"
+                          />
+                        </label>
+                        <label className="space-y-1.5">
+                          <span className="text-sm font-medium text-slate-400">避ける振る舞い</span>
+                          <textarea
+                            rows={3}
+                            value={agent.viewpointAvoid}
+                            onChange={(event) => updateAgent(agent.id, { viewpointAvoid: event.target.value })}
+                            placeholder="この立場で偏りすぎてほしくないこと"
+                            className="w-full resize-none rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500"
+                          />
+                        </label>
+                      </div>
+                    </div>
+
                     <div className="mt-4 grid gap-4 md:grid-cols-2">
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium text-slate-400">スタンス（意見の方向性）</label>
@@ -1058,7 +1181,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           {getProviderSelectionHelpMessage(
                             isProviderSelectionReady,
                             isCurrentProviderInstalled,
-                            shouldRequireNodeSetup
+                            providerRequiresNodeSetup(agent.provider)
                           )}
                         </p>
                       </div>

@@ -4,6 +4,7 @@ import {
   PERSONALITY_VALUE_ALIASES,
   STANCE_PRESETS,
   STANCE_VALUE_ALIASES,
+  getViewpointRolePreset,
   normalizeSelectableValue
 } from '../config/agentMetadata'
 import { getDefaultBuiltInAgentIcon, type BuiltInAgentIconId } from '../config/iconAssets'
@@ -13,8 +14,19 @@ export type AgentRole = 'Participant' | 'Facilitator'
 export type HandRaiseMode = 'rule-based' | 'ai-evaluation'
 export type ExecutionMode = 'orchestration' | 'autonomous'
 export type DiscussionStyle = 'conversation' | 'meeting'
-export type AgentCliProvider = 'codex' | 'gemini' | 'copilot'
+export type AgentCliProvider = 'codex' | 'gemini' | 'copilot' | 'claude'
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type AgentViewpointRoleId =
+  | 'executive-business'
+  | 'operations'
+  | 'project-management'
+  | 'customer-user'
+  | 'sales-market'
+  | 'technical-practice'
+  | 'finance-accounting'
+  | 'people-organization'
+  | 'legal-compliance-ip'
+  | 'security-risk'
 
 export interface RateLimitWindow {
   remaining: number | null
@@ -55,6 +67,9 @@ export interface AgentProfile {
   role: AgentRole
   stance: string
   personality: string
+  viewpointRoleId: AgentViewpointRoleId | null
+  viewpointFocus: string
+  viewpointAvoid: string
   avatarPreset: BuiltInAgentIconId | null
   avatarCustomDataUrl: string | null
   avatarCustomName: string | null
@@ -76,9 +91,64 @@ export interface Message {
   timestamp: number
 }
 
+export interface StructuredFinalConclusion {
+  schemaVersion: 1
+  title: string
+  conclusionSummary: string
+  finalAnswer: string
+  reasoning: string[]
+  supportingPoints: string[]
+  counterArguments: string[]
+  unresolvedIssues: string[]
+  risks: string[]
+  confidence: {
+    score: number
+    reason: string
+  }
+  nextActions: Array<{
+    label: string
+    detail: string
+    priority: 'high' | 'medium' | 'low'
+  }>
+}
+
+export type ConvergenceStatus = 'exploring' | 'debating' | 'needs_verification' | 'ready_to_conclude' | 'blocked'
+
+export interface DeliberationState {
+  agenda: string[]
+  claims: Array<{
+    id: string
+    text: string
+    supportLevel: 'weak' | 'medium' | 'strong'
+    challengedBy: string[]
+  }>
+  openIssues: string[]
+  disagreements: string[]
+  evidenceGaps: string[]
+  consensus: {
+    level: number
+    summary: string
+  }
+  convergence: {
+    status: ConvergenceStatus
+    reason: string
+    confidence: number
+    recommendedNextFocus: string | null
+  }
+}
+
+export interface ConvergenceDecision {
+  readyToConclude: boolean
+  confidence: number
+  reason: string
+  remainingIssues: string[]
+  nextFocus: string | null
+}
+
 export interface OrchestrationDebug {
   sessionId: string
   turn: number
+  executionMode: ExecutionMode
   selectedSpeakerId: string | null
   dispatchReason: string
   facilitator: {
@@ -93,7 +163,13 @@ export interface OrchestrationDebug {
     interventionPriority: number
     shouldIntervene: boolean
     parallelDispatch: boolean
+    unresolvedIssues: string[]
+    evidenceGaps: string[]
+    readyToConclude: boolean
+    recommendedNextFocus: string | null
   } | null
+  deliberationState: DeliberationState | null
+  convergenceDecision: ConvergenceDecision | null
   scores: Array<{
     agentId: string
     runtimeSessionId: string | null
@@ -104,7 +180,7 @@ export interface OrchestrationDebug {
   }>
   workers: Array<{
     workerId: string
-    kind: 'score' | 'moderation' | 'speech' | 'synthesis'
+    kind: 'score' | 'moderation' | 'speech' | 'synthesis' | 'deliberation' | 'autonomous'
     targetAgentId?: string
     startedAt: number
     finishedAt: number
@@ -137,6 +213,7 @@ interface TurtleBrainState {
   messages: Message[]
   sessionStatus: 'idle' | 'running' | 'finished'
   finalConclusion: string | null
+  finalConclusionStructured: StructuredFinalConclusion | null
   sessionError: string | null
   backendSessionId: string | null
   sessionRunNonce: number
@@ -327,6 +404,34 @@ function createFallbackProviderCatalogs(): ProviderCatalogMap {
           billingMultiplier: 0
         })
       ]
+    },
+    claude: {
+      provider: 'claude',
+      label: 'Claude Code',
+      source: 'fallback',
+      fetchedAt: null,
+      available: true,
+      error: null,
+      models: [
+        createProviderModel('sonnet', 'Sonnet (latest alias)', {
+          description: 'Claude Code latest Sonnet alias.',
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('opus', 'Opus (latest alias)', {
+          description: 'Claude Code latest Opus alias.',
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'high'
+        }),
+        createProviderModel('claude-sonnet-4-6', 'Claude Sonnet 4.6', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('claude-opus-4-6', 'Claude Opus 4.6', {
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'high'
+        })
+      ]
     }
   }
 }
@@ -339,7 +444,8 @@ function cloneCatalogs(catalogs: ProviderCatalogMap): ProviderCatalogMap {
   return {
     codex: { ...catalogs.codex, models: catalogs.codex.models.map((model) => ({ ...model })) },
     gemini: { ...catalogs.gemini, models: catalogs.gemini.models.map((model) => ({ ...model })) },
-    copilot: { ...catalogs.copilot, models: catalogs.copilot.models.map((model) => ({ ...model })) }
+    copilot: { ...catalogs.copilot, models: catalogs.copilot.models.map((model) => ({ ...model })) },
+    claude: { ...catalogs.claude, models: catalogs.claude.models.map((model) => ({ ...model })) }
   }
 }
 
@@ -351,15 +457,29 @@ function normalizeAgentSelections<T extends { stance: string; personality: strin
   }
 }
 
-function ensureAgentAvatarState(agent: AgentProfile, index = 0): AgentProfile {
+function normalizeViewpointRoleId(value: unknown): AgentViewpointRoleId | null {
+  return typeof value === 'string' && getViewpointRolePreset(value as AgentViewpointRoleId)
+    ? value as AgentViewpointRoleId
+    : null
+}
+
+function ensureAgentProfileState(agent: AgentProfile, index = 0): AgentProfile {
   const rawAgent = agent as AgentProfile & {
     avatarPreset?: BuiltInAgentIconId | null
     avatarCustomDataUrl?: string | null
     avatarCustomName?: string | null
+    viewpointRoleId?: AgentViewpointRoleId | null
+    viewpointFocus?: string | null
+    viewpointAvoid?: string | null
   }
+  const viewpointRoleId = normalizeViewpointRoleId(rawAgent.viewpointRoleId)
+  const viewpointPreset = getViewpointRolePreset(viewpointRoleId)
 
   return {
     ...agent,
+    viewpointRoleId,
+    viewpointFocus: rawAgent.viewpointFocus ?? viewpointPreset?.defaultFocus ?? '',
+    viewpointAvoid: rawAgent.viewpointAvoid ?? viewpointPreset?.defaultAvoid ?? '',
     avatarPreset:
       rawAgent.avatarPreset === undefined ? getDefaultBuiltInAgentIcon(index) : (rawAgent.avatarPreset ?? null),
     avatarCustomDataUrl: rawAgent.avatarCustomDataUrl ?? null,
@@ -369,12 +489,29 @@ function ensureAgentAvatarState(agent: AgentProfile, index = 0): AgentProfile {
 
 function createAgent(
   partial: Pick<AgentProfile, 'id' | 'name' | 'role' | 'stance' | 'personality'> &
-    Partial<Pick<AgentProfile, 'provider' | 'model' | 'reasoningEffort' | 'avatarPreset' | 'avatarCustomDataUrl' | 'avatarCustomName'>>
+    Partial<
+      Pick<
+        AgentProfile,
+        | 'provider'
+        | 'model'
+        | 'reasoningEffort'
+        | 'viewpointRoleId'
+        | 'viewpointFocus'
+        | 'viewpointAvoid'
+        | 'avatarPreset'
+        | 'avatarCustomDataUrl'
+        | 'avatarCustomName'
+      >
+    >
 ): AgentProfile {
+  const viewpointPreset = getViewpointRolePreset(partial.viewpointRoleId ?? null)
   const baseAgent: AgentProfile = {
     provider: partial.provider ?? 'codex',
     model: partial.model ?? 'gpt-5.4',
     reasoningEffort: partial.reasoningEffort ?? 'medium',
+    viewpointRoleId: partial.viewpointRoleId ?? null,
+    viewpointFocus: partial.viewpointFocus ?? viewpointPreset?.defaultFocus ?? '',
+    viewpointAvoid: partial.viewpointAvoid ?? viewpointPreset?.defaultAvoid ?? '',
     avatarPreset: partial.avatarPreset ?? null,
     avatarCustomDataUrl: partial.avatarCustomDataUrl ?? null,
     avatarCustomName: partial.avatarCustomName ?? null,
@@ -386,7 +523,7 @@ function createAgent(
     ...partial
   }
 
-  return ensureAgentAvatarState(normalizeAgentSelections(baseAgent))
+  return ensureAgentProfileState(normalizeAgentSelections(baseAgent))
 }
 
 const conversationDefaultAgents: AgentProfile[] = [
@@ -397,6 +534,7 @@ const conversationDefaultAgents: AgentProfile[] = [
     stance: 'アイデア出し・新規性重視',
     personality: '率直・論理的',
     avatarPreset: 'user_icon1',
+    viewpointRoleId: 'executive-business',
     provider: 'codex',
     model: 'gpt-5.4'
   }),
@@ -407,6 +545,7 @@ const conversationDefaultAgents: AgentProfile[] = [
     stance: '批判的・データ重視',
     personality: '丁寧・堅実',
     avatarPreset: 'user_icon2',
+    viewpointRoleId: 'customer-user',
     provider: 'copilot',
     model: 'gpt-5.2'
   })
@@ -420,6 +559,7 @@ const meetingDefaultAgents: AgentProfile[] = [
     stance: 'アイデア出し・新規性重視',
     personality: '率直・論理的',
     avatarPreset: 'user_icon1',
+    viewpointRoleId: 'executive-business',
     provider: 'codex',
     model: 'gpt-5.4'
   }),
@@ -430,6 +570,7 @@ const meetingDefaultAgents: AgentProfile[] = [
     stance: '品質重視・リスク分析',
     personality: '慎重・分析的',
     avatarPreset: 'user_icon2',
+    viewpointRoleId: 'security-risk',
     provider: 'copilot',
     model: 'gpt-5.2'
   }),
@@ -440,6 +581,7 @@ const meetingDefaultAgents: AgentProfile[] = [
     stance: 'ユーザー目線',
     personality: '前向き・協調的',
     avatarPreset: 'user_icon3',
+    viewpointRoleId: 'customer-user',
     provider: 'gemini',
     model: 'gemini-2.5-flash'
   }),
@@ -450,6 +592,7 @@ const meetingDefaultAgents: AgentProfile[] = [
     stance: '中立・合意形成重視',
     personality: '丁寧・俯瞰的',
     avatarPreset: 'user_icon4',
+    viewpointRoleId: 'project-management',
     provider: 'codex',
     model: 'gpt-5.4'
   })
@@ -457,7 +600,7 @@ const meetingDefaultAgents: AgentProfile[] = [
 
 function cloneAgents(agents: AgentProfile[]): AgentProfile[] {
   return agents.map((agent, index) => ({
-    ...ensureAgentAvatarState(normalizeAgentSelections(agent), index),
+    ...ensureAgentProfileState(normalizeAgentSelections(agent), index),
     rateLimits: agent.rateLimits
       ? {
           source: agent.rateLimits.source,
@@ -643,7 +786,7 @@ function getAgentInteractionErrorMessage(error: unknown, details?: string): stri
 
 function sanitizeAgents(agents: AgentProfile[]): AgentProfile[] {
   return agents.map((agent, index) => ({
-    ...ensureAgentAvatarState(normalizeAgentSelections(agent), index),
+    ...ensureAgentProfileState(normalizeAgentSelections(agent), index),
     runtimeSessionId: null,
     rateLimits: agent.rateLimits ?? createEmptyRateLimits(),
     status: 'idle',
@@ -654,7 +797,7 @@ function sanitizeAgents(agents: AgentProfile[]): AgentProfile[] {
 
 function reconcileAgentsWithCatalogs(agents: AgentProfile[], catalogs: ProviderCatalogMap): AgentProfile[] {
   return agents.map((agent, index) => {
-    const normalizedAgent = ensureAgentAvatarState(normalizeAgentSelections(agent), index)
+    const normalizedAgent = ensureAgentProfileState(normalizeAgentSelections(agent), index)
     const providerCatalog = catalogs[agent.provider]
     const models = providerCatalog?.models ?? []
     const matchedModel = models.find((model) => model.id === normalizedAgent.model)
@@ -708,7 +851,7 @@ const initialHandRaiseMode = getEffectiveHandRaiseMode(
 )
 
 export const useStore = create<TurtleBrainState>((set, get) => ({
-  agents: persistedSettings?.agents ?? cloneAgents(conversationDefaultAgents),
+  agents: persistedSettings?.agents ? cloneAgents(persistedSettings.agents) : cloneAgents(conversationDefaultAgents),
   topic: '',
   inputPaths: [],
   turnLimit: persistedSettings?.turnLimit ?? 3,
@@ -720,6 +863,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
   messages: [],
   sessionStatus: 'idle',
   finalConclusion: null,
+  finalConclusionStructured: null,
   sessionError: null,
   backendSessionId: null,
   sessionRunNonce: 0,
@@ -738,6 +882,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       messages: [],
       currentTurn: 0,
       finalConclusion: null,
+      finalConclusionStructured: null,
       sessionError: null,
       backendSessionId: null,
       sessionRunNonce: 0,
@@ -756,6 +901,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         messages: [],
         currentTurn: 0,
         finalConclusion: null,
+        finalConclusionStructured: null,
         sessionError: null,
         backendSessionId: null,
         sessionRunNonce: 0,
@@ -770,7 +916,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
     set((state) => ({
       agents: [
         ...state.agents,
-        ensureAgentAvatarState(
+        ensureAgentProfileState(
           normalizeAgentSelections({ ...agent, rateLimits: agent.rateLimits ?? createEmptyRateLimits() }),
           state.agents.length
         )
@@ -781,7 +927,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
     set((state) => ({
       agents: state.agents.map((agent, index) =>
         agent.id === id
-          ? ensureAgentAvatarState(normalizeAgentSelections({
+          ? ensureAgentProfileState(normalizeAgentSelections({
               ...agent,
               ...updates,
               rateLimits: updates.rateLimits ?? agent.rateLimits
@@ -845,6 +991,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       messages: [],
       sessionStatus: 'idle',
       finalConclusion: null,
+      finalConclusionStructured: null,
       sessionError: null,
       backendSessionId: null,
       sessionRunNonce: state.sessionRunNonce + 1,
@@ -877,7 +1024,8 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       const mergedCatalogs: ProviderCatalogMap = {
         codex: normalizeCatalog(incoming.codex ?? fallbackCatalogs.codex, fallbackCatalogs.codex),
         gemini: normalizeCatalog(incoming.gemini ?? fallbackCatalogs.gemini, fallbackCatalogs.gemini),
-        copilot: normalizeCatalog(incoming.copilot ?? fallbackCatalogs.copilot, fallbackCatalogs.copilot)
+        copilot: normalizeCatalog(incoming.copilot ?? fallbackCatalogs.copilot, fallbackCatalogs.copilot),
+        claude: normalizeCatalog(incoming.claude ?? fallbackCatalogs.claude, fallbackCatalogs.claude)
       }
 
       set({
@@ -906,6 +1054,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       currentTurn: 1,
       messages: [],
       finalConclusion: null,
+      finalConclusionStructured: null,
       sessionError: null,
       backendSessionId: null,
       orchestrationDebug: null,
@@ -949,6 +1098,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         messages: [],
         currentTurn: 0,
         finalConclusion: null,
+        finalConclusionStructured: null,
         sessionError: null,
         backendSessionId: null,
         sessionRunNonce: state.sessionRunNonce + 1,
@@ -978,6 +1128,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
         currentTurn: number
         sessionStatus: TurtleBrainState['sessionStatus']
         finalConclusion: string | null
+        finalConclusionStructured: StructuredFinalConclusion | null
         debug: OrchestrationDebug | null
         details?: string
         error?: string
@@ -989,6 +1140,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
           sessionId: state.backendSessionId,
           topic: state.topic,
           inputPaths: state.inputPaths,
+          executionMode: state.executionMode,
           discussionStyle: state.discussionStyle,
           handRaiseMode: getEffectiveHandRaiseMode(state.discussionStyle, state.executionMode, state.handRaiseMode),
           turnLimit: state.turnLimit,
@@ -1007,11 +1159,12 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
 
       set({
         backendSessionId: data.sessionId,
-        agents: data.agents.map((agent, index) => ensureAgentAvatarState(normalizeAgentSelections(agent), index)),
+        agents: data.agents.map((agent, index) => ensureAgentProfileState(normalizeAgentSelections(agent), index)),
         messages: data.messages,
         currentTurn: data.currentTurn,
         sessionStatus: data.sessionStatus,
         finalConclusion: data.finalConclusion,
+        finalConclusionStructured: data.finalConclusionStructured,
         orchestrationDebug: data.debug,
         sessionError: null
       })

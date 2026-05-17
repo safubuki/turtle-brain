@@ -58,7 +58,8 @@ app.get('/api/providers/install-info', async (_req, res) => {
       providers: {
         codex: getProviderInstallSpec('codex'),
         gemini: getProviderInstallSpec('gemini'),
-        copilot: getProviderInstallSpec('copilot')
+        copilot: getProviderInstallSpec('copilot'),
+        claude: getProviderInstallSpec('claude')
       },
       runtime
     })
@@ -75,7 +76,7 @@ app.get('/api/providers/install-info', async (_req, res) => {
 app.post('/api/providers/install', async (req, res) => {
   try {
     const { provider } = req.body as { provider?: AgentCliProvider }
-    if (!provider || !['codex', 'gemini', 'copilot'].includes(provider)) {
+    if (!provider || !['codex', 'gemini', 'copilot', 'claude'].includes(provider)) {
       res.status(400).json({
         success: false,
         error: 'Bad Request',

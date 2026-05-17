@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "dev": "powershell -ExecutionPolicy Bypass -File ./start-dev.ps1",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --require ts-node/register ./orchestrator.test.ts"
   },
   "keywords": [],
   "author": "",

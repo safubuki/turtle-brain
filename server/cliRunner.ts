@@ -1,10 +1,10 @@
-import { spawn } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { getProviderCatalogs } from './providerCatalog'
 
-export type AgentCliProvider = 'codex' | 'gemini' | 'copilot'
+export type AgentCliProvider = 'codex' | 'gemini' | 'copilot' | 'claude'
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface RateLimitWindow {
@@ -64,6 +64,7 @@ function dedupeStrings(values: Array<string | null | undefined>): string[] {
 }
 
 function getCandidateNpmRoots(): string[] {
+  const npmGlobalRoot = getNpmGlobalBinRoot()
   const pathRoots =
     process.env.PATH?.split(path.delimiter)
       .map((entry) => entry.trim())
@@ -71,12 +72,36 @@ function getCandidateNpmRoots(): string[] {
       .filter((entry) => /[\\/]npm$/i.test(entry) || /appdata[\\/]roaming[\\/]npm/i.test(entry)) ?? []
 
   return dedupeStrings([
+    npmGlobalRoot,
     process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : null,
     process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm') : null,
     process.env.NPM_CONFIG_PREFIX || null,
     process.env.npm_config_prefix || null,
     ...pathRoots
   ])
+}
+
+function getNpmCommand(): string {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm'
+}
+
+function getNpmGlobalBinRoot(): string | null {
+  try {
+    const rawRoot = execFileSync(getNpmCommand(), ['root', '-g'], {
+      encoding: 'utf8',
+      windowsHide: true
+    }).trim()
+
+    if (!rawRoot) {
+      return null
+    }
+
+    return path.basename(rawRoot).toLowerCase() === 'node_modules'
+      ? path.dirname(rawRoot)
+      : rawRoot
+  } catch {
+    return null
+  }
 }
 
 function sanitizeSessionId(sessionId: string | undefined | null): string | null {
@@ -97,7 +122,7 @@ function sanitizeSessionId(sessionId: string | undefined | null): string | null 
 }
 
 function shouldResumeSession(provider: AgentCliProvider): boolean {
-  return provider === 'codex' || provider === 'gemini'
+  return provider === 'codex' || provider === 'gemini' || provider === 'claude'
 }
 
 function getNpmRoot(): string {
@@ -109,14 +134,36 @@ function getCliCommandPath(provider: AgentCliProvider): string {
 
   switch (provider) {
     case 'codex':
-      return process.platform === 'win32' ? path.join(npmBin, 'codex.cmd') : 'codex'
+      return findCommandPath('codex', npmBin) ?? (process.platform === 'win32' ? path.join(npmBin, 'codex.cmd') : 'codex')
     case 'gemini':
-      return process.platform === 'win32' ? path.join(npmBin, 'gemini.cmd') : 'gemini'
+      return findCommandPath('gemini', npmBin) ?? (process.platform === 'win32' ? path.join(npmBin, 'gemini.cmd') : 'gemini')
     case 'copilot':
-      return process.platform === 'win32' ? path.join(npmBin, 'copilot.cmd') : 'copilot'
+      return findCommandPath('copilot', npmBin) ?? (process.platform === 'win32' ? path.join(npmBin, 'copilot.cmd') : 'copilot')
+    case 'claude':
+      return findCommandPath('claude') ?? 'claude'
     default:
       return provider
   }
+}
+
+function findCommandPath(commandName: string, preferredRoot?: string): string | null {
+  const extensions = process.platform === 'win32' ? ['.cmd', '.exe', ''] : ['']
+  const roots = dedupeStrings([
+    preferredRoot,
+    ...getCandidateNpmRoots(),
+    ...(process.env.PATH?.split(path.delimiter) ?? [])
+  ])
+
+  for (const root of roots) {
+    for (const extension of extensions) {
+      const candidate = path.join(root, `${commandName}${extension}`)
+      if (fs.existsSync(candidate)) {
+        return candidate
+      }
+    }
+  }
+
+  return null
 }
 
 function getCliScriptPath(provider: AgentCliProvider): string | null {
@@ -131,10 +178,13 @@ function getCliScriptPath(provider: AgentCliProvider): string | null {
         candidatePath = path.join(packageRoot, '@openai', 'codex', 'bin', 'codex.js')
         break
       case 'gemini':
-        candidatePath = path.join(packageRoot, '@google', 'gemini-cli', 'dist', 'index.js')
+        candidatePath = path.join(packageRoot, '@google', 'gemini-cli', 'bundle', 'gemini.js')
         break
       case 'copilot':
         candidatePath = path.join(packageRoot, '@github', 'copilot', 'npm-loader.js')
+        break
+      case 'claude':
+        candidatePath = null
         break
       default:
         candidatePath = null
@@ -397,6 +447,43 @@ function parseCodexOutput(
   }
 }
 
+function parseClaudeOutput(stdout: string): CliExecResult {
+  try {
+    const parsed = JSON.parse(stdout) as Record<string, unknown>
+    const response =
+      typeof parsed.result === 'string'
+        ? parsed.result.trim()
+        : typeof parsed.response === 'string'
+          ? parsed.response.trim()
+          : typeof parsed.content === 'string'
+            ? parsed.content.trim()
+            : typeof parsed.message === 'string'
+              ? parsed.message.trim()
+              : stdout.trim()
+
+    const sessionId =
+      typeof parsed.session_id === 'string'
+        ? parsed.session_id
+        : typeof parsed.sessionId === 'string'
+          ? parsed.sessionId
+          : typeof parsed.conversationId === 'string'
+            ? parsed.conversationId
+            : null
+
+    return {
+      response,
+      sessionId,
+      rateLimits: extractRateLimits(parsed, 'claude')
+    }
+  } catch {
+    return {
+      response: stdout.trim(),
+      sessionId: null,
+      rateLimits: null
+    }
+  }
+}
+
 async function runCopilotViaSdk(
   options: CliRunOptions,
   supportsReasoning: boolean
@@ -473,6 +560,8 @@ function getReadableDirectoryArgs(provider: AgentCliProvider): string[] {
       return ['--include-directories', WORKSPACE_ROOT]
     case 'copilot':
       return ['--add-dir', WORKSPACE_ROOT]
+    case 'claude':
+      return ['--add-dir', WORKSPACE_ROOT]
     default:
       return []
   }
@@ -498,8 +587,8 @@ async function getModelRuntimeCapabilities(
   }
 
   return {
-    supportedReasoningEfforts: provider === 'gemini' ? [] : [],
-    defaultReasoningEffort: null
+    supportedReasoningEfforts: provider === 'claude' ? ['low', 'medium', 'high', 'xhigh'] : [],
+    defaultReasoningEffort: provider === 'claude' ? 'medium' : null
   }
 }
 
@@ -509,7 +598,13 @@ function buildPromptPrefix(
   supportsReasoning: boolean
 ): string {
   const providerLabel =
-    provider === 'codex' ? 'Codex CLI' : provider === 'gemini' ? 'Gemini CLI' : 'GitHub Copilot CLI'
+    provider === 'codex'
+      ? 'Codex CLI'
+      : provider === 'gemini'
+        ? 'Gemini CLI'
+        : provider === 'copilot'
+          ? 'GitHub Copilot CLI'
+          : 'Claude Code'
 
   const lines = [
     `You are running inside ${providerLabel}.`,
@@ -621,6 +716,32 @@ function buildProviderArgs(
         stdinPrompt: prompt
       }
     }
+
+    case 'claude': {
+      const args = [
+        '--print',
+        '--output-format',
+        'json',
+        '--permission-mode',
+        'plan',
+        '--model',
+        options.model,
+        ...readableDirectoryArgs
+      ]
+
+      if (supportsReasoning) {
+        args.push('--effort', options.reasoningEffort)
+      }
+
+      if (resumableSessionId) {
+        args.push('--resume', resumableSessionId)
+      }
+
+      return {
+        args,
+        stdinPrompt: prompt
+      }
+    }
   }
 }
 
@@ -720,6 +841,11 @@ export async function runCli(options: CliRunOptions): Promise<CliExecResult> {
 
       if (options.provider === 'gemini') {
         resolve(parseGeminiOutput(trimmedStdout))
+        return
+      }
+
+      if (options.provider === 'claude') {
+        resolve(parseClaudeOutput(trimmedStdout))
         return
       }
 
