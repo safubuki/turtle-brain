@@ -20,6 +20,8 @@ export type AgentViewpointRoleId =
   | 'customer-user'
   | 'sales-market'
   | 'technical-practice'
+  | 'quality-qms'
+  | 'research-development'
   | 'finance-accounting'
   | 'people-organization'
   | 'legal-compliance-ip'
@@ -426,7 +428,7 @@ function normalizeStructuredFinalConclusion(value: unknown): StructuredFinalConc
 
   return {
     schemaVersion: 1,
-    title: asString(record.title, '最終結論'),
+    title: asString(record.title, '最終整理'),
     conclusionSummary,
     finalAnswer: finalAnswer || conclusionSummary,
     reasoning: asStringArray(record.reasoning, 10),
@@ -479,10 +481,12 @@ function formatDeliberationStateForPrompt(state: DeliberationState | null): stri
 const VIEWPOINT_ROLE_LABELS: Record<AgentViewpointRoleId, string> = {
   'executive-business': '経営・事業責任',
   operations: '現場・業務運用',
-  'project-management': 'プロジェクト推進',
+  'project-management': 'プロジェクト・プロダクト推進',
   'customer-user': '顧客・利用者',
   'sales-market': '営業・市場',
-  'technical-practice': '技術・専門実務',
+  'technical-practice': '開発担当者',
+  'quality-qms': '品質・QMS',
+  'research-development': '研究開発',
   'finance-accounting': '財務・経理',
   'people-organization': '人事・組織',
   'legal-compliance-ip': '法務・コンプライアンス・知財',
@@ -505,7 +509,7 @@ function formatAgentPerspectiveForPrompt(
   const lines = [
     `Viewpoint role: ${getAgentViewpointLabel(agent)}`,
     agent.viewpointFocus ? `Primary viewpoint focus: ${agent.viewpointFocus}` : '',
-    agent.viewpointAvoid ? `Avoid over-biasing toward: ${agent.viewpointAvoid}` : ''
+    agent.viewpointAvoid ? `Avoid leaning too heavily on: ${agent.viewpointAvoid}` : ''
   ].filter(Boolean)
 
   return lines.join('\n')
@@ -1060,7 +1064,7 @@ export class MeetingOrchestrator {
     this.applyTurnAnalysisToDebug(session, deliberationWorker)
 
     if (convergenceDecision.readyToConclude && convergenceDecision.confidence >= 70 && session.messages.length >= 2) {
-      await this.finalizeSession(session, `収束判定により最終結論を生成しました: ${convergenceDecision.reason}`)
+      await this.finalizeSession(session, `収束判定により最終整理を生成しました: ${convergenceDecision.reason}`)
       return this.serializeSession(session)
     }
 
@@ -1720,7 +1724,7 @@ export class MeetingOrchestrator {
     }
   }
 
-  private async finalizeSession(session: MeetingSession, reason = 'ターン上限に到達したため最終結論を生成しました。'): Promise<void> {
+  private async finalizeSession(session: MeetingSession, reason = 'ターン上限に到達したため最終整理を生成しました。'): Promise<void> {
     if (session.finalConclusion) {
       session.status = 'finished'
       return
@@ -1765,7 +1769,7 @@ export class MeetingOrchestrator {
         runtimeSessionId: synthesizer.runtimeSessionId,
         overview: '議論全体の要約',
         rationale: '終了条件に到達したため総括を作成',
-        nextFocus: '最終結論の提示',
+        nextFocus: '最終整理の提示',
         selectedAgentId: null,
         selectedAgentIds: [],
         inviteAgentIds: [],
@@ -2326,7 +2330,7 @@ export class MeetingOrchestrator {
     const transcript = getRecentTranscript(session, 20)
     return [
       getSafeSharedPromptContext(session),
-      'Create the final conclusion in Japanese.',
+      'Create the final organized conclusion in Japanese. Do not produce a chronological transcript.',
       `Agent viewpoints:\n${formatAgentProfilesForPrompt(session.agents)}`,
       `Deliberation state:\n${formatDeliberationStateForPrompt(session.deliberationState)}`,
       session.convergenceDecision
@@ -2337,6 +2341,7 @@ export class MeetingOrchestrator {
       '{"schemaVersion":1,"title":"短いタイトル","conclusionSummary":"結論の要約","finalAnswer":"最終回答","reasoning":["理由"],"supportingPoints":["根拠・支持点"],"counterArguments":["反対意見・反証"],"unresolvedIssues":["未解決事項"],"risks":["リスク"],"confidence":{"score":0-100,"reason":"信頼度理由"},"nextActions":[{"label":"アクション名","detail":"詳細","priority":"high|medium|low"}]}',
       'If there are no counter arguments, unresolved issues, risks, or next actions, return an empty array for that field.',
       'Reflect the useful differences between configured viewpoints. Summarize what to do next, why, what to watch, and which perspective raised each major concern when it matters.',
+      'Merge repeated or half-finished remarks into coherent decisions, reasons, unresolved issues, risks, and next actions. Do not merely enumerate intermediate conversation results.',
       `Discussion log: ${transcript}`
     ].filter(Boolean).join('\n\n')
   }

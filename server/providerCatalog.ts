@@ -31,8 +31,24 @@ interface CachedCatalogs {
   catalogs: ProviderCatalogMap
 }
 
+interface CodexCatalogPayload {
+  fetched_at?: string
+  models?: Array<{
+    slug?: string
+    display_name?: string
+    description?: string
+    visibility?: string
+    supported_reasoning_levels?: Array<{ effort?: unknown }>
+    default_reasoning_level?: unknown
+  }>
+}
+
 const CACHE_TTL_MS = 5 * 60 * 1000
 let cachedCatalogs: CachedCatalogs | null = null
+
+export function clearProviderCatalogCache(): void {
+  cachedCatalogs = null
+}
 
 function dedupeStrings(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))]
@@ -127,7 +143,8 @@ function createFallbackCatalog(provider: AgentCliProvider, error: string | null 
       available,
       error,
       models: [
-        { id: 'gpt-5.4', name: 'gpt-5.4', description: 'Latest frontier agentic coding model.', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
+        { id: 'gpt-5.5', name: 'gpt-5.5', description: 'Latest frontier agentic coding model.', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
+        { id: 'gpt-5.4', name: 'gpt-5.4', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
         { id: 'gpt-5.4-mini', name: 'gpt-5.4-mini', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
         { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
         { id: 'gpt-5.2-codex', name: 'gpt-5.2-codex', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], defaultReasoningEffort: 'medium', billingMultiplier: null },
@@ -327,25 +344,31 @@ function normalizeModelInfo(value: unknown): ProviderModelInfo[] {
 }
 
 async function discoverCodexCatalog(): Promise<ProviderCatalogResponse> {
-  const filePath = path.join(process.env.USERPROFILE ?? '', '.codex', 'models_cache.json')
-  const payload = JSON.parse(await fs.readFile(filePath, 'utf8')) as {
-    fetched_at?: string
-    models?: Array<{
-      slug?: string
-      display_name?: string
-      description?: string
-      visibility?: string
-      supported_reasoning_levels?: Array<{ effort?: unknown }>
-      default_reasoning_level?: unknown
-    }>
+  const commandPath = findCommandPath('codex')
+  if (commandPath) {
+    try {
+      const output = await runCommand(commandPath, ['debug', 'models'], 30000)
+      const payload = JSON.parse(output) as CodexCatalogPayload
+      if (Array.isArray(payload.models) && payload.models.length > 0) {
+        return createCodexCatalog(payload, `Codex debug models (${commandPath})`)
+      }
+    } catch {
+      // Fall back to the cache file below for older Codex CLI builds.
+    }
   }
 
+  const filePath = path.join(process.env.USERPROFILE ?? '', '.codex', 'models_cache.json')
+  const payload = JSON.parse(await fs.readFile(filePath, 'utf8')) as CodexCatalogPayload
+  return createCodexCatalog(payload, 'Codex models_cache.json')
+}
+
+function createCodexCatalog(payload: CodexCatalogPayload, source: string): ProviderCatalogResponse {
   const models = Array.isArray(payload.models) ? payload.models : []
 
   return {
     provider: 'codex',
     label: 'Codex CLI',
-    source: 'Codex models_cache.json',
+    source,
     fetchedAt: payload.fetched_at ?? new Date().toISOString(),
     available: true,
     error: null,

@@ -7,6 +7,7 @@ import {
   FolderOpen,
   MessageSquarePlus,
   Play,
+  RotateCcw,
   Settings,
   Square,
   Upload,
@@ -224,6 +225,42 @@ function appendStructuredConclusionMarkdown(base: string, conclusion: Structured
   return md
 }
 
+function formatStructuredConclusionForFollowUp(conclusion: StructuredFinalConclusion): string {
+  const lines = [
+    `### ${conclusion.title}`,
+    `- 結論サマリー: ${conclusion.conclusionSummary}`,
+    `- 最終回答: ${conclusion.finalAnswer}`
+  ]
+
+  if (conclusion.reasoning.length > 0) {
+    lines.push(`- 主な根拠: ${conclusion.reasoning.join(' / ')}`)
+  }
+
+  if (conclusion.unresolvedIssues.length > 0) {
+    lines.push(`- 未解決事項: ${conclusion.unresolvedIssues.join(' / ')}`)
+  }
+
+  if (conclusion.risks.length > 0) {
+    lines.push(`- リスク: ${conclusion.risks.join(' / ')}`)
+  }
+
+  if (conclusion.nextActions.length > 0) {
+    lines.push(`- 次のアクション: ${conclusion.nextActions.map((action) => `${action.label}: ${action.detail}`).join(' / ')}`)
+  }
+
+  return lines.join('\n')
+}
+
+function formatConclusionForFollowUp(finalConclusion: string | null, sections: ConclusionSection[]): string {
+  if (sections.length > 0) {
+    return sections
+      .map((section) => [`### ${section.title}`, ...section.lines.map((line) => `- ${line}`)].join('\n'))
+      .join('\n\n')
+  }
+
+  return finalConclusion?.trim() ?? ''
+}
+
 function getAgentAliases(agent: AgentProfile): string[] {
   const aliases = new Set<string>([agent.name])
 
@@ -418,6 +455,7 @@ function App() {
   const [summaryModal, setSummaryModal] = useState<{ agentName: string; content: string } | null>(null)
   const [pathDialogBusy, setPathDialogBusy] = useState<'files' | 'folder' | null>(null)
   const [inputPathError, setInputPathError] = useState<string | null>(null)
+  const topicTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const requestedTurnRef = useRef<string | null>(null)
 
   const orderedMessages = [...messages].sort((left, right) => left.timestamp - right.timestamp)
@@ -472,6 +510,35 @@ function App() {
     setIsDebugOpen(false)
   }
 
+  const handlePrepareFollowUpDiscussion = () => {
+    const originalTopic = topic || localTopic || '未設定'
+    const conclusionText = finalConclusionStructured
+      ? formatStructuredConclusionForFollowUp(finalConclusionStructured)
+      : formatConclusionForFollowUp(finalConclusion, conclusionSections)
+
+    if (!conclusionText) {
+      return
+    }
+
+    const nextTopic = [
+      '以下は前回の議論で出た最終整理です。',
+      'この結論を前提に、妥当性、見落とし、反対意見、追加で確認すべきことを再度議論してください。',
+      '',
+      '## 当初の議題',
+      originalTopic,
+      '',
+      '## 前回の最終整理',
+      conclusionText
+    ].join('\n')
+
+    setLocalTopic(nextTopic)
+    setInputPathError(null)
+    window.requestAnimationFrame(() => {
+      topicTextareaRef.current?.focus()
+      topicTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }
+
   const handleDownloadMd = () => {
     const now = new Date()
     const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
@@ -495,14 +562,14 @@ function App() {
     agents.forEach((agent) => {
       const viewpointPreset = getViewpointRolePreset(agent.viewpointRoleId)
       md += `### ${agent.name}\n`
-      md += `- 視点ロール: ${viewpointPreset?.label ?? '標準'}\n`
+      md += `- 役割: ${viewpointPreset?.label ?? '標準'}\n`
       if (agent.viewpointFocus) {
         md += `- 重視する観点: ${agent.viewpointFocus}\n`
       }
       if (agent.viewpointAvoid) {
-        md += `- 避ける振る舞い: ${agent.viewpointAvoid}\n`
+        md += `- 避けること: ${agent.viewpointAvoid}\n`
       }
-      md += `- ロール: ${formatAgentRole(agent.role)}\n`
+      md += `- 参加区分: ${formatAgentRole(agent.role)}\n`
       md += `- スタンス: ${agent.stance}\n`
       md += `- 性格: ${agent.personality}\n`
       md += `- CLI: ${PROVIDER_LABELS[agent.provider]}\n`
@@ -511,7 +578,7 @@ function App() {
     })
 
     if (finalConclusionStructured || finalConclusion) {
-      md += '## 最終結論\n\n'
+      md += '## 最終整理\n\n'
       if (finalConclusionStructured) {
         md = appendStructuredConclusionMarkdown(md, finalConclusionStructured)
       } else if (conclusionSections.length > 0) {
@@ -632,60 +699,119 @@ function App() {
           </div>
         </div>
 
-        <div className="flex-1 space-y-6 overflow-y-auto p-4">
-          <section className="space-y-2">
+        <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex min-h-full flex-col gap-6">
+            <section className="space-y-3 rounded-2xl border border-slate-700/50 bg-slate-900/40 p-3">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">操作</h2>
             <button
               onClick={handleNewSession}
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-3 font-medium text-white shadow-lg shadow-cyan-500/20 transition-all hover:from-cyan-400 hover:to-blue-500"
+              className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-4 font-bold text-white shadow-lg shadow-cyan-500/20 transition-all hover:from-cyan-400 hover:to-blue-500"
             >
               <MessageSquarePlus size={18} />
               新規セッション
             </button>
             <button
               onClick={() => setIsSettingsOpen(true)}
-              className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-700/50 px-4 py-3 font-medium text-slate-300 transition-all hover:bg-slate-800"
+              className="flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 font-bold text-amber-100 shadow-lg shadow-amber-950/10 transition-all hover:border-amber-300/50 hover:bg-amber-500/15 hover:text-white"
             >
               <Settings size={18} />
               エージェント設定
             </button>
+            {sessionStatus !== 'running' ? (
+              <button
+                onClick={handleStart}
+                disabled={!localTopic.trim()}
+                className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-400 to-green-500 px-4 font-bold text-emerald-950 shadow-lg shadow-emerald-500/20 transition-all hover:from-emerald-300 hover:to-green-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Play size={18} fill="currentColor" />
+                議論を開始
+              </button>
+            ) : (
+              <button
+                onClick={stopSession}
+                className="flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-4 font-bold text-red-300 shadow-lg shadow-red-950/10 transition-colors hover:bg-red-500/20"
+              >
+                <Square size={18} fill="currentColor" />
+                停止
+              </button>
+            )}
+          </section>
+
+          <section className="space-y-3 rounded-2xl border border-slate-700/50 bg-slate-900/40 p-3">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">設定情報</h2>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2.5">
+                <span className="text-xs font-semibold tracking-wider text-emerald-400">実行モード</span>
+                <span className="truncate text-sm font-medium text-slate-100">{executionModeInfo.label}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2.5">
+                <span className="text-xs font-semibold tracking-wider text-cyan-400">議論スタイル</span>
+                <span className="truncate text-sm font-medium text-slate-100">{discussionStyleInfo.label}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-700/50 bg-slate-900/50 px-3 py-2.5">
+                <span className="text-xs font-semibold tracking-wider text-slate-400">入力コンテキスト</span>
+                <span className="text-sm font-medium text-slate-100">
+                  {sessionStatus === 'running' || sessionStatus === 'finished'
+                    ? `${inputPaths.length} 件`
+                    : `${pendingInputPaths.length} 件`}
+                </span>
+              </div>
+            </div>
           </section>
 
           <section className="space-y-3">
-            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3">
-              <p className="text-xs font-semibold tracking-wider text-emerald-400">実行モード</p>
-              <p className="mt-2 text-sm font-medium text-slate-100">{executionModeInfo.label}</p>
-              <p className="mt-1 text-xs leading-5 text-slate-400">{executionModeInfo.shortDescription}</p>
-            </div>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">エージェント一覧 ({agents.length})</h2>
+            <div className="space-y-3">
+              {agents.map((agent) => (
+                <div key={agent.id} className="rounded-xl border border-slate-700/50 bg-slate-800/50 p-3.5">
+                  <div className="flex items-start gap-3">
+                    <AgentAvatar
+                      size={48}
+                      avatarPreset={agent.avatarPreset}
+                      avatarCustomDataUrl={agent.avatarCustomDataUrl}
+                      alt={`${agent.name} アイコン`}
+                      className="rounded-lg border border-slate-700/60"
+                      fallbackClassName={
+                        agent.role === 'Facilitator'
+                          ? 'bg-amber-500/20 text-amber-400'
+                          : 'bg-cyan-500/20 text-cyan-400'
+                      }
+                      iconClassName={agent.role === 'Facilitator' ? 'text-amber-400' : 'text-cyan-400'}
+                    />
 
-            <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold tracking-wider text-cyan-400">議論スタイル</p>
-                <button
-                  onClick={() => setIsDebugOpen((open) => !open)}
-                  className="rounded-md border border-slate-700/60 px-2 py-1 text-[10px] text-slate-300 transition-colors hover:border-slate-500 hover:text-white"
-                >
-                  {isDebugOpen ? 'デバッグを閉じる' : 'デバッグ'}
-                </button>
-              </div>
-              <p className="mt-2 text-sm font-medium text-slate-100">{discussionStyleInfo.label}</p>
-              <p className="mt-1 text-xs leading-5 text-slate-400">{discussionStyleInfo.shortDescription}</p>
+                    <div className="min-w-0 flex-1" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                      <p className="truncate text-sm font-semibold text-slate-100">{agent.name}</p>
+                      <p className="text-xs text-slate-400">{formatAgentRole(agent.role)}</p>
+                      <p className="mt-1 text-xs text-cyan-200">
+                        視点: {getViewpointRolePreset(agent.viewpointRoleId)?.label ?? '標準'}
+                      </p>
+                      <p className="mt-2 text-xs text-slate-300">スタンス: {agent.stance}</p>
+                      <p className="mt-1 text-xs text-slate-300">性格: {agent.personality}</p>
+                      <p
+                        className="mt-2 min-h-[40px] text-xs leading-5 text-slate-500"
+                        style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                      >
+                        {PROVIDER_LABELS[agent.provider]} / {agent.model}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
+          </section>
 
-            <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3">
-              <p className="text-xs font-semibold tracking-wider text-slate-400">入力コンテキスト</p>
-              <p className="mt-2 text-sm text-slate-200">
-                {sessionStatus === 'running' || sessionStatus === 'finished'
-                  ? `${inputPaths.length} 件`
-                  : `${pendingInputPaths.length} 件`}
-              </p>
-              <p className="mt-1 text-xs leading-5 text-slate-400">
-                指定したファイルやフォルダの内容を、議論の入力コンテキストとして参照します。
-              </p>
-            </div>
+          <section className="mt-auto space-y-3 rounded-2xl border border-slate-700/50 bg-slate-900/40 p-3">
+            <button
+              type="button"
+              onClick={() => setIsDebugOpen((open) => !open)}
+              className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-700/60 bg-slate-900/60 px-3 text-sm font-medium text-slate-300 transition-colors hover:border-slate-500 hover:text-white"
+            >
+              <Eye size={16} />
+              {isDebugOpen ? 'デバッグを閉じる' : 'デバッグ'}
+            </button>
 
             {isDebugOpen && (
-              <div className="space-y-4 rounded-xl border border-slate-700/50 bg-slate-900/40 p-4 text-sm text-slate-300">
+              <div className="space-y-4 rounded-xl border border-slate-700/50 bg-slate-950/35 p-4 text-sm text-slate-300">
                 <div className="space-y-1">
                   <p className="font-semibold text-slate-100">オーケストレーション Session ID</p>
                   <p className="break-all font-mono text-xs text-slate-400">{backendSessionId ?? '未生成'}</p>
@@ -837,47 +963,7 @@ function App() {
               </div>
             )}
           </section>
-
-          <section className="space-y-3">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">エージェント一覧 ({agents.length})</h2>
-            <div className="space-y-3">
-              {agents.map((agent) => (
-                <div key={agent.id} className="rounded-xl border border-slate-700/50 bg-slate-800/50 p-3.5">
-                  <div className="flex items-start gap-3">
-                    <AgentAvatar
-                      size={48}
-                      avatarPreset={agent.avatarPreset}
-                      avatarCustomDataUrl={agent.avatarCustomDataUrl}
-                      alt={`${agent.name} アイコン`}
-                      className="rounded-lg border border-slate-700/60"
-                      fallbackClassName={
-                        agent.role === 'Facilitator'
-                          ? 'bg-amber-500/20 text-amber-400'
-                          : 'bg-cyan-500/20 text-cyan-400'
-                      }
-                      iconClassName={agent.role === 'Facilitator' ? 'text-amber-400' : 'text-cyan-400'}
-                    />
-
-                    <div className="min-w-0 flex-1" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
-                      <p className="truncate text-sm font-semibold text-slate-100">{agent.name}</p>
-                      <p className="text-xs text-slate-400">{formatAgentRole(agent.role)}</p>
-                      <p className="mt-1 text-xs text-cyan-200">
-                        視点: {getViewpointRolePreset(agent.viewpointRoleId)?.label ?? '標準'}
-                      </p>
-                      <p className="mt-2 text-xs text-slate-300">スタンス: {agent.stance}</p>
-                      <p className="mt-1 text-xs text-slate-300">性格: {agent.personality}</p>
-                      <p
-                        className="mt-2 min-h-[40px] text-xs leading-5 text-slate-500"
-                        style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
-                      >
-                        {PROVIDER_LABELS[agent.provider]} / {agent.model}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
+          </div>
         </div>
       </aside>
 
@@ -887,10 +973,11 @@ function App() {
 
         <header className="glass-panel relative z-10 shrink-0 border-b border-slate-700/50 px-6 py-4">
           <div className="mx-auto max-w-7xl space-y-4">
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.8fr)_minmax(340px,1fr)_220px]">
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(360px,0.8fr)]">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-slate-300">議題 / 指示</label>
                 <textarea
+                  ref={topicTextareaRef}
                   rows={6}
                   value={localTopic}
                   onChange={(event) => setLocalTopic(event.target.value)}
@@ -898,31 +985,30 @@ function App() {
                   placeholder="複数行で入力できます。例: この提案について、コスト、開発速度、運用性、ユーザー影響の観点で議論してください。"
                   className="h-[176px] w-full resize-none rounded-2xl border border-slate-700 bg-slate-900/50 px-4 py-3 text-base leading-7 text-slate-100 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 disabled:opacity-60"
                 />
-                <p className="text-xs text-slate-500">複数行の自然言語をそのまま議題として扱います。</p>
               </div>
 
               <div className="space-y-2">
                 <label className="text-sm font-medium text-slate-300">入力ファイル / フォルダ</label>
                 <div className="flex h-[176px] flex-col rounded-2xl border border-slate-700 bg-slate-900/50 px-4 py-3">
-                  <div className="flex flex-wrap gap-2">
+                  <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
                       disabled={sessionStatus === 'running' || pathDialogBusy !== null}
                       onClick={() => void handleAddFiles()}
-                      className="flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition-colors hover:border-cyan-500/50 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex h-10 min-w-0 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900/70 px-3 text-sm font-medium text-slate-200 transition-colors hover:border-cyan-500/50 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Upload size={16} />
-                      {pathDialogBusy === 'files' ? '選択中...' : 'ファイルを追加'}
+                      <span className="truncate">{pathDialogBusy === 'files' ? '選択中...' : 'ファイルを追加'}</span>
                     </button>
 
                     <button
                       type="button"
                       disabled={sessionStatus === 'running' || pathDialogBusy !== null}
                       onClick={() => void handleAddFolder()}
-                      className="flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition-colors hover:border-cyan-500/50 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex h-10 min-w-0 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900/70 px-3 text-sm font-medium text-slate-200 transition-colors hover:border-cyan-500/50 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <FolderOpen size={16} />
-                      {pathDialogBusy === 'folder' ? '選択中...' : 'フォルダを追加'}
+                      <span className="truncate">{pathDialogBusy === 'folder' ? '選択中...' : 'フォルダを追加'}</span>
                     </button>
                   </div>
 
@@ -951,34 +1037,12 @@ function App() {
                       </div>
                     ) : (
                       <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-slate-700/60 text-center text-sm text-slate-500">
-                        ファイルまたはフォルダを追加すると、内容を議論の入力コンテキストに含めます。
+                        未追加
                       </div>
                     )}
                   </div>
                 </div>
-                <p className="text-xs text-slate-500">複数ファイルを一括追加でき、カードの × で個別に外せます。</p>
                 {inputPathError && <p className="text-xs text-rose-300">{inputPathError}</p>}
-              </div>
-
-              <div className="flex flex-col justify-end gap-3">
-                {sessionStatus !== 'running' ? (
-                  <button
-                    onClick={handleStart}
-                    disabled={!localTopic.trim()}
-                    className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-4 font-bold text-white shadow-lg shadow-cyan-500/20 transition-all hover:from-cyan-400 hover:to-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <Play size={18} fill="currentColor" />
-                    議論を開始
-                  </button>
-                ) : (
-                  <button
-                    onClick={stopSession}
-                    className="flex items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-6 py-4 font-bold text-red-300 transition-colors hover:bg-red-500/20"
-                  >
-                    <Square size={18} fill="currentColor" />
-                    停止
-                  </button>
-                )}
               </div>
             </div>
 
@@ -1232,18 +1296,27 @@ function App() {
                     <FileText size={20} />
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-cyan-400">最終結論</h3>
-                    <p className="text-sm text-slate-400">議論全体を統合した最終出力です。</p>
+                    <h3 className="text-xl font-bold text-cyan-400">最終整理</h3>
+                    <p className="text-sm text-slate-400">結論・根拠・未決事項・次のアクションを統合します。</p>
                   </div>
                 </div>
 
-                <button
-                  onClick={handleDownloadMd}
-                  className="flex items-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-medium text-cyan-300 transition-colors hover:bg-cyan-500/20"
-                >
-                  <Download size={16} />
-                  MDダウンロード
-                </button>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    onClick={handlePrepareFollowUpDiscussion}
+                    className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20"
+                  >
+                    <RotateCcw size={16} />
+                    この整理を再議論
+                  </button>
+                  <button
+                    onClick={handleDownloadMd}
+                    className="flex items-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-medium text-cyan-300 transition-colors hover:bg-cyan-500/20"
+                  >
+                    <Download size={16} />
+                    MDダウンロード
+                  </button>
+                </div>
               </div>
 
               {finalConclusionStructured && (

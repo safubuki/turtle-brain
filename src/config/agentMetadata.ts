@@ -30,32 +30,8 @@ export const VIEWPOINT_ROLE_PRESETS: ViewpointRolePreset[] = [
     typicalQuestions: ['この判断は事業目的に合うか', '限られた資源をここに使うべきか'],
     defaultStance: '長期視点・コスト重視・合意形成重視',
     defaultPersonality: '俯瞰的・論理的',
-    defaultFocus: '事業目的、投資対効果、意思決定の優先順位、長期的な責任範囲を重視する。',
-    defaultAvoid: '細部の実装論だけに寄りすぎず、事業上の判断材料へ戻す。'
-  },
-  {
-    id: 'operations',
-    label: '現場・業務運用',
-    category: '実行',
-    description: '現場で本当に回るか、手順・負荷・継続運用の観点で確認します。',
-    looksAt: ['現場負荷', '業務手順', '継続運用', '例外対応'],
-    typicalQuestions: ['誰がどの手順で運用するか', '繁忙時や例外時にも回るか'],
-    defaultStance: '実践派・運用重視',
-    defaultPersonality: '堅実・率直',
-    defaultFocus: '現場負荷、業務手順、運用継続性、例外対応、教育しやすさを重視する。',
-    defaultAvoid: '理想論だけで進めず、日々の運用で詰まる点を具体化する。'
-  },
-  {
-    id: 'project-management',
-    label: 'プロジェクト推進',
-    category: '実行',
-    description: 'スケジュール、体制、依存関係、マイルストーンから実行可能性を見ます。',
-    looksAt: ['計画', '依存関係', '体制', '進捗管理'],
-    typicalQuestions: ['いつ誰が進めるか', '詰まりやすい依存関係は何か'],
-    defaultStance: '実装重視・速度重視・合意形成重視',
-    defaultPersonality: '前向き・調整的',
-    defaultFocus: 'スケジュール、担当、依存関係、意思決定ポイント、実行順序を重視する。',
-    defaultAvoid: '抽象論で終わらせず、次に動ける単位へ分解する。'
+    defaultFocus: '事業目的、収益性、投資判断、優先順位、長期方針',
+    defaultAvoid: '短期の好みだけでの意思決定、現場・顧客・財務への影響の見落とし'
   },
   {
     id: 'customer-user',
@@ -66,8 +42,8 @@ export const VIEWPOINT_ROLE_PRESETS: ViewpointRolePreset[] = [
     typicalQuestions: ['利用者は何に価値を感じるか', '現場で使い続けられるか'],
     defaultStance: 'ユーザー目線・受容的',
     defaultPersonality: '前向き・共感的',
-    defaultFocus: '利用者の価値、困りごと、理解しやすさ、導入時の心理的抵抗を重視する。',
-    defaultAvoid: '提供側の都合だけで判断せず、使う人の行動と負担に引き戻す。'
+    defaultFocus: '利用者の価値、困りごと、理解しやすさ、導入時の抵抗感',
+    defaultAvoid: '利用者の行動実態を見ない判断、使いにくさや負担の見落とし'
   },
   {
     id: 'sales-market',
@@ -78,68 +54,116 @@ export const VIEWPOINT_ROLE_PRESETS: ViewpointRolePreset[] = [
     typicalQuestions: ['顧客にどう説明するか', '競合より何が強いか'],
     defaultStance: '価値訴求重視・顧客目線',
     defaultPersonality: '率直・前向き',
-    defaultFocus: '提案価値、市場性、競合差別化、商談で説明しやすいメッセージを重視する。',
-    defaultAvoid: '社内都合の説明に寄りすぎず、顧客が買う理由を明確にする。'
+    defaultFocus: '提案価値、市場性、競合差別化、説明しやすさ',
+    defaultAvoid: '機能説明だけでの提案、顧客の購買理由が弱いままの判断'
+  },
+  {
+    id: 'operations',
+    label: '現場・業務運用',
+    category: '現場',
+    description: '現場で本当に回るか、手順・負荷・継続運用の観点で確認します。',
+    looksAt: ['現場負荷', '業務手順', '継続運用', '例外対応'],
+    typicalQuestions: ['誰がどの手順で運用するか', '繁忙時や例外時にも回るか'],
+    defaultStance: '実践派・運用重視',
+    defaultPersonality: '堅実・率直',
+    defaultFocus: '現場負荷、業務手順、継続運用、例外対応',
+    defaultAvoid: '理想的な手順だけでの判断、繁忙時・例外時・担当者負荷の見落とし'
+  },
+  {
+    id: 'project-management',
+    label: 'プロジェクト・プロダクト推進',
+    category: '推進',
+    description: '目的、優先順位、体制、依存関係から、PM/PO視点で前に進めます。',
+    looksAt: ['目的', '優先順位', '依存関係', '意思決定'],
+    typicalQuestions: ['何を優先して進めるか', '誰がいつ意思決定するか'],
+    defaultStance: '優先順位重視・合意形成重視',
+    defaultPersonality: '前向き・調整的',
+    defaultFocus: '目的、優先順位、スケジュール、担当、依存関係、意思決定',
+    defaultAvoid: '目的や優先順位が曖昧なままの進行、担当・期限・依存関係の曖昧さ'
+  },
+  {
+    id: 'research-development',
+    label: '研究開発',
+    category: '現場・技術',
+    description: '新規性、実験仮説、技術探索、将来価値から可能性を見ます。',
+    looksAt: ['新規性', '実験可能性', '技術探索', '将来価値'],
+    typicalQuestions: ['どんな新しい価値や仮説があるか', '何を検証すれば前に進むか'],
+    defaultStance: '探索重視・長期視点',
+    defaultPersonality: '創造的・論理的',
+    defaultFocus: '新規性、実験仮説、技術探索、将来価値',
+    defaultAvoid: '既存手段への早すぎる収束、検証仮説や学習価値の曖昧さ'
   },
   {
     id: 'technical-practice',
-    label: '技術・専門実務',
-    category: '専門性',
-    description: '実現可能性、品質、保守性、専門的な制約を確認します。',
-    looksAt: ['実現可能性', '品質', '保守性', '技術負債'],
-    typicalQuestions: ['実装・運用できるか', '将来の保守負荷は妥当か'],
-    defaultStance: '品質重視・実践派',
-    defaultPersonality: '論理的・慎重',
-    defaultFocus: '実装可能性、品質、保守性、技術負債、専門的な制約を重視する。',
-    defaultAvoid: '技術的な正しさだけでなく、事業・運用上の妥当性も考慮する。'
+    label: '開発担当者',
+    category: '現場・技術',
+    description: '要件を実装に落とし、リリース・運用・保守できる形にします。',
+    looksAt: ['実装計画', '設計', '保守性', 'リリース影響'],
+    typicalQuestions: ['どう実装して届けるか', '運用や保守で無理が出ないか'],
+    defaultStance: '実装重視・現実解重視',
+    defaultPersonality: '論理的・実践的',
+    defaultFocus: '仕様理解、設計、実装難易度、保守性、リリース影響',
+    defaultAvoid: '仕様や前提が曖昧なままの実装、保守・移行・リリース負荷の見落とし'
+  },
+  {
+    id: 'quality-qms',
+    label: '品質・QMS',
+    category: '品質・統制',
+    description: '品質基準、検証方法、標準化、監査性、不具合予防を確認します。',
+    looksAt: ['品質保証', '標準化', '監査性', '不具合予防'],
+    typicalQuestions: ['品質基準を満たすか', '再現性と記録は十分か'],
+    defaultStance: '品質重視・標準化重視',
+    defaultPersonality: '慎重・体系的',
+    defaultFocus: '品質基準、検証方法、標準化、監査性、不具合予防',
+    defaultAvoid: '属人的な確認だけでの判断、品質基準・記録・再発防止の曖昧さ'
   },
   {
     id: 'finance-accounting',
     label: '財務・経理',
-    category: '管理',
+    category: 'スタッフ',
     description: 'コスト、予算、採算、費用対効果、会計上の扱いを見ます。',
     looksAt: ['予算', '採算', '費用対効果', '会計影響'],
     typicalQuestions: ['予算化できるか', '回収期間や継続費用は妥当か'],
     defaultStance: 'コスト重視・データ重視',
     defaultPersonality: '慎重・分析的',
-    defaultFocus: '初期費用、継続費用、予算、採算、費用対効果、会計上の扱いを重視する。',
-    defaultAvoid: '効果を定性的な期待だけで扱わず、金額・期間・根拠へ落とす。'
+    defaultFocus: '初期費用、継続費用、予算、採算、費用対効果',
+    defaultAvoid: '期待値だけでの効果判断、費用・期間・回収根拠の曖昧さ'
   },
   {
     id: 'people-organization',
     label: '人事・組織',
-    category: '組織',
+    category: 'スタッフ',
     description: '人員、評価、教育、採用、組織影響、心理的安全性を確認します。',
     looksAt: ['人員', '教育', '評価', '組織影響'],
     typicalQuestions: ['必要な人材と育成は足りるか', '組織や働き方に無理がないか'],
     defaultStance: '受容的・長期視点',
     defaultPersonality: '共感的・俯瞰的',
-    defaultFocus: '人員配置、教育、採用、評価、心理的安全性、組織への影響を重視する。',
-    defaultAvoid: '制度や人の負担を軽視せず、継続可能な働き方として考える。'
+    defaultFocus: '人員配置、教育、採用、評価、心理的安全性',
+    defaultAvoid: '制度や体制だけでの判断、人員負荷・育成・納得感の軽視'
   },
   {
     id: 'legal-compliance-ip',
     label: '法務・コンプライアンス・知財',
-    category: 'リスク',
+    category: 'スタッフ・統制',
     description: '契約、規制、責任範囲、権利、知財リスクを確認します。',
     looksAt: ['契約', '規制', '責任範囲', '知財'],
     typicalQuestions: ['契約・規制に抵触しないか', '権利や責任の所在は明確か'],
     defaultStance: 'リスク分析・保守性重視',
     defaultPersonality: '慎重・論理的',
-    defaultFocus: '契約、規制、責任範囲、知財、コンプライアンス上の説明可能性を重視する。',
-    defaultAvoid: 'リスクを過度に恐れて止めるだけでなく、条件付きで進める方法も探す。'
+    defaultFocus: '契約、規制、責任範囲、知財、説明可能性',
+    defaultAvoid: '契約・規制・権利関係が曖昧なままの進行'
   },
   {
     id: 'security-risk',
     label: 'セキュリティ・リスク管理',
-    category: 'リスク',
+    category: 'スタッフ・統制',
     description: '情報管理、事故、監査、BCP、悪用可能性を確認します。',
     looksAt: ['情報管理', '監査', '事故対応', 'BCP'],
     typicalQuestions: ['事故や悪用の可能性は何か', '監査や復旧の準備は十分か'],
     defaultStance: 'セキュリティ重視・リスク分析',
     defaultPersonality: '慎重・分析的',
-    defaultFocus: '情報管理、権限、監査、事故対応、BCP、悪用可能性を重視する。',
-    defaultAvoid: '不安を並べるだけでなく、現実的な対策と残余リスクを分けて示す。'
+    defaultFocus: '情報管理、権限、監査、事故対応、BCP、悪用可能性',
+    defaultAvoid: '根拠のない安全性の楽観視、対策や残余リスクの曖昧さ'
   }
 ]
 

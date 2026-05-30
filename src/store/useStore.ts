@@ -23,6 +23,8 @@ export type AgentViewpointRoleId =
   | 'customer-user'
   | 'sales-market'
   | 'technical-practice'
+  | 'quality-qms'
+  | 'research-development'
   | 'finance-accounting'
   | 'people-organization'
   | 'legal-compliance-ip'
@@ -279,8 +281,12 @@ function createFallbackProviderCatalogs(): ProviderCatalogMap {
       available: true,
       error: null,
       models: [
-        createProviderModel('gpt-5.4', 'gpt-5.4', {
+        createProviderModel('gpt-5.5', 'gpt-5.5', {
           description: 'Latest frontier agentic coding model.',
+          supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultReasoningEffort: 'medium'
+        }),
+        createProviderModel('gpt-5.4', 'gpt-5.4', {
           supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
           defaultReasoningEffort: 'medium'
         }),
@@ -463,6 +469,159 @@ function normalizeViewpointRoleId(value: unknown): AgentViewpointRoleId | null {
     : null
 }
 
+const LEGACY_VIEWPOINT_DEFAULTS: Partial<
+  Record<AgentViewpointRoleId, { focus?: string[]; avoid?: string[] }>
+> = {
+  'executive-business': {
+    focus: [
+      '事業目的、投資対効果、意思決定の優先順位、長期的な責任範囲を重視する。',
+      '事業目的、収益性、投資判断、長期方針から議論を整理します。'
+    ],
+    avoid: [
+      '細部の実装論だけに寄りすぎず、事業上の判断材料へ戻す。',
+      '細部の実装論だけに寄らず、事業上の判断材料へ戻します。',
+      '細部の実装論だけで判断せず、投資判断・優先順位・長期影響へ戻します。',
+      '短期の好みや実装詳細だけで意思決定しません。',
+      '短期の好みや実装詳細だけでの意思決定'
+    ]
+  },
+  'customer-user': {
+    focus: [
+      '利用者の価値、困りごと、理解しやすさ、導入時の心理的抵抗を重視する。',
+      '利用者の価値、困りごと、理解しやすさ、導入時の抵抗感から確認します。'
+    ],
+    avoid: [
+      '提供側の都合だけで判断せず、使う人の行動と負担に引き戻す。',
+      '提供側の都合だけで判断せず、使う人の行動と負担へ引き戻します。',
+      '提供側の都合や作り手目線に偏らず、利用者の行動・負担・受容性で確認します。',
+      '提供側の都合をそのまま受け入れず、分かりにくさや利用負担を見過ごしません。',
+      '提供側の都合だけでの判断、分かりにくさや利用負担の見落とし'
+    ]
+  },
+  'sales-market': {
+    focus: [
+      '提案価値、市場性、競合差別化、商談で説明しやすいメッセージを重視する。',
+      '提案価値、市場性、競合差別化、説明しやすさから売れる理由を整理します。'
+    ],
+    avoid: [
+      '社内都合の説明に寄りすぎず、顧客が買う理由を明確にする。',
+      '社内都合の説明に寄りすぎず、顧客が買う理由を明確にします。',
+      '機能説明や社内都合に寄りすぎず、顧客が買う理由と伝わり方を確認します。',
+      '機能説明だけで売れると見なさず、顧客の購買理由が弱い提案を通しません。'
+    ]
+  },
+  operations: {
+    focus: [
+      '現場負荷、業務手順、運用継続性、例外対応、教育しやすさを重視する。',
+      '現場負荷、業務手順、継続運用、例外対応から実行しやすさを確認します。'
+    ],
+    avoid: [
+      '理想論だけで進めず、日々の運用で詰まる点を具体化する。',
+      '理想論だけで進めず、日々の運用で詰まる点を具体化します。',
+      '理想的な手順だけで進めず、繁忙時・例外時・担当者負荷まで確認します。',
+      '理想的な手順だけで納得せず、繁忙時・例外時・担当者負荷を見落としません。'
+    ]
+  },
+  'project-management': {
+    focus: [
+      'スケジュール、担当、依存関係、意思決定ポイント、実行順序を重視する。',
+      'スケジュール、担当、依存関係、意思決定ポイントから実行順序を整理します。',
+      '目的、優先順位、スケジュール、担当、依存関係から実行順序を整理します。'
+    ],
+    avoid: [
+      '抽象論で終わらせず、次に動ける単位へ分解する。',
+      '抽象論で終わらせず、次に動ける単位へ分解します。',
+      '方針や期待だけで進めず、担当・期限・依存関係を実行単位へ落とします。',
+      '方針や期待だけで進行せず、担当・期限・依存関係を曖昧なままにしません。'
+    ]
+  },
+  'research-development': {
+    focus: [
+      '新規性、実験仮説、技術探索、将来価値から可能性を確認します。'
+    ]
+  },
+  'technical-practice': {
+    focus: [
+      '実装可能性、品質、保守性、技術負債、専門的な制約を重視する。',
+      '実装可能性、品質、保守性、技術負債、専門的制約から妥当性を確認します。',
+      '設計、実装難易度、保守性、リリース影響から世に出せる形を確認します。'
+    ],
+    avoid: [
+      '技術的な正しさだけでなく、事業・運用上の妥当性も考慮する。',
+      '技術的な正しさだけに寄らず、事業・運用上の妥当性も考慮します。',
+      '技術的な正しさだけで完結させず、導入・運用・保守の現実性も確認します。',
+      '技術的な正しさだけを優先せず、導入・運用・保守の無理を見過ごしません。',
+      '技術的な正しさだけの優先、導入・運用・保守の無理の見落とし',
+      '研究段階の可能性だけでの判断、保守・移行・リリース負荷の見落とし'
+    ]
+  },
+  'quality-qms': {
+    focus: [
+      '品質基準、検証方法、標準化、監査性、不具合予防から確認します。'
+    ]
+  },
+  'finance-accounting': {
+    focus: [
+      '初期費用、継続費用、予算、採算、費用対効果、会計上の扱いを重視する。',
+      '初期費用、継続費用、予算、採算、費用対効果から判断材料を整理します。'
+    ],
+    avoid: [
+      '効果を定性的な期待だけで扱わず、金額・期間・根拠へ落とす。',
+      '効果を定性的な期待だけで扱わず、金額・期間・根拠へ落とします。',
+      '定性的な期待だけで判断せず、金額・期間・回収根拠へ落とします。',
+      '効果を期待値だけで認めず、費用・期間・回収根拠を曖昧なままにしません。'
+    ]
+  },
+  'people-organization': {
+    focus: [
+      '人員配置、教育、採用、評価、心理的安全性、組織への影響を重視する。',
+      '人員配置、教育、採用、評価、心理的安全性から組織影響を確認します。'
+    ],
+    avoid: [
+      '制度や人の負担を軽視せず、継続可能な働き方として考える。',
+      '制度や人の負担を軽視せず、継続可能な働き方として考えます。',
+      '制度設計だけで完結させず、人員負荷・育成・納得感まで確認します。',
+      '制度や体制だけで成立すると見なさず、人員負荷・育成・納得感を軽視しません。'
+    ]
+  },
+  'legal-compliance-ip': {
+    focus: [
+      '契約、規制、責任範囲、知財、コンプライアンス上の説明可能性を重視する。',
+      '契約、規制、責任範囲、知財、説明可能性からリスクを確認します。'
+    ],
+    avoid: [
+      'リスクを過度に恐れて止めるだけでなく、条件付きで進める方法も探す。',
+      'リスクを恐れて止めるだけでなく、条件付きで進める方法も探します。',
+      'リスク指摘だけで止めず、条件・責任範囲・代替案を明確にします。',
+      '契約・規制・権利関係が曖昧なまま進めません。'
+    ]
+  },
+  'security-risk': {
+    focus: [
+      '情報管理、権限、監査、事故対応、BCP、悪用可能性を重視する。',
+      '情報管理、権限、監査、事故対応、BCP、悪用可能性から安全性を確認します。'
+    ],
+    avoid: [
+      '不安を並べるだけでなく、現実的な対策と残余リスクを分けて示す。',
+      '不安を並べるだけでなく、現実的な対策と残余リスクを分けて示します。',
+      '危険性を並べるだけで終えず、優先度・対策・残余リスクを分けて示します。',
+      '安全性を根拠なく楽観視せず、対策や残余リスクを曖昧なままにしません。'
+    ]
+  }
+}
+
+function normalizePresetBackedField(
+  value: string | null | undefined,
+  currentDefault: string,
+  legacyDefaults: string[] | undefined
+): string {
+  if (value === null || value === undefined) {
+    return currentDefault
+  }
+
+  return legacyDefaults?.includes(value) ? currentDefault : value
+}
+
 function ensureAgentProfileState(agent: AgentProfile, index = 0): AgentProfile {
   const rawAgent = agent as AgentProfile & {
     avatarPreset?: BuiltInAgentIconId | null
@@ -474,12 +633,21 @@ function ensureAgentProfileState(agent: AgentProfile, index = 0): AgentProfile {
   }
   const viewpointRoleId = normalizeViewpointRoleId(rawAgent.viewpointRoleId)
   const viewpointPreset = getViewpointRolePreset(viewpointRoleId)
+  const legacyDefaults = viewpointRoleId ? LEGACY_VIEWPOINT_DEFAULTS[viewpointRoleId] : undefined
 
   return {
     ...agent,
     viewpointRoleId,
-    viewpointFocus: rawAgent.viewpointFocus ?? viewpointPreset?.defaultFocus ?? '',
-    viewpointAvoid: rawAgent.viewpointAvoid ?? viewpointPreset?.defaultAvoid ?? '',
+    viewpointFocus: normalizePresetBackedField(
+      rawAgent.viewpointFocus,
+      viewpointPreset?.defaultFocus ?? '',
+      legacyDefaults?.focus
+    ),
+    viewpointAvoid: normalizePresetBackedField(
+      rawAgent.viewpointAvoid,
+      viewpointPreset?.defaultAvoid ?? '',
+      legacyDefaults?.avoid
+    ),
     avatarPreset:
       rawAgent.avatarPreset === undefined ? getDefaultBuiltInAgentIcon(index) : (rawAgent.avatarPreset ?? null),
     avatarCustomDataUrl: rawAgent.avatarCustomDataUrl ?? null,
@@ -536,7 +704,7 @@ const conversationDefaultAgents: AgentProfile[] = [
     avatarPreset: 'user_icon1',
     viewpointRoleId: 'executive-business',
     provider: 'codex',
-    model: 'gpt-5.4'
+    model: 'gpt-5.5'
   }),
   createAgent({
     id: 'agent-2',
@@ -561,7 +729,7 @@ const meetingDefaultAgents: AgentProfile[] = [
     avatarPreset: 'user_icon1',
     viewpointRoleId: 'executive-business',
     provider: 'codex',
-    model: 'gpt-5.4'
+    model: 'gpt-5.5'
   }),
   createAgent({
     id: 'agent-2',
@@ -570,7 +738,7 @@ const meetingDefaultAgents: AgentProfile[] = [
     stance: '品質重視・リスク分析',
     personality: '慎重・分析的',
     avatarPreset: 'user_icon2',
-    viewpointRoleId: 'security-risk',
+    viewpointRoleId: 'quality-qms',
     provider: 'copilot',
     model: 'gpt-5.2'
   }),
@@ -594,7 +762,7 @@ const meetingDefaultAgents: AgentProfile[] = [
     avatarPreset: 'user_icon4',
     viewpointRoleId: 'project-management',
     provider: 'codex',
-    model: 'gpt-5.4'
+    model: 'gpt-5.5'
   })
 ]
 

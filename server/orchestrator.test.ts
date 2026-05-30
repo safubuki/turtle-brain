@@ -123,7 +123,7 @@ function createFakeRunner(): (options: CliRunOptions) => Promise<CliExecResult> 
   }
 }
 
-test('収束時に構造化された最終結論を返す', async () => {
+test('収束時に構造化された最終整理を返す', async () => {
   const orchestrator = new MeetingOrchestrator(createFakeRunner())
   const firstTurn = await orchestrator.runTurn(createBaseRequest())
 

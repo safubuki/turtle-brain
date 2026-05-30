@@ -246,3 +246,11 @@ export async function installProviderCli(provider: AgentCliProvider): Promise<{
     })
   })
 }
+
+export async function updateProviderCli(provider: AgentCliProvider): Promise<{
+  spec: ProviderInstallSpec
+  stdout: string
+  stderr: string
+}> {
+  return installProviderCli(provider)
+}

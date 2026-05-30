@@ -61,10 +61,16 @@ const ALL_PROVIDERS = Object.keys(PROVIDER_LABELS) as AgentProfile['provider'][]
 const DEFAULT_VIEWPOINT_SEQUENCE: Array<NonNullable<AgentProfile['viewpointRoleId']>> = [
   'executive-business',
   'customer-user',
+  'sales-market',
   'operations',
   'project-management',
+  'research-development',
   'technical-practice',
-  'finance-accounting'
+  'quality-qms',
+  'finance-accounting',
+  'people-organization',
+  'legal-compliance-ip',
+  'security-risk'
 ]
 
 function getDefaultViewpointRoleId(index: number): NonNullable<AgentProfile['viewpointRoleId']> {
@@ -99,7 +105,7 @@ function getProviderFallbackModel(provider: AgentProfile['provider']): string {
     case 'claude':
       return 'sonnet'
     default:
-      return 'gpt-5.4'
+      return 'gpt-5.5'
   }
 }
 
@@ -178,7 +184,7 @@ function getProviderInstallCardMessage(
   shouldRequireNodeSetup: boolean
 ): string {
   if (isAvailable) {
-    return '利用可能な CLI です。'
+    return '利用可能な CLI です。モデル候補が古い場合は更新できます。'
   }
 
   if (shouldRequireNodeSetup) {
@@ -359,6 +365,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [installSpecs, setInstallSpecs] = useState<Record<AgentProfile['provider'], ProviderInstallSpec> | null>(null)
   const [installRuntime, setInstallRuntime] = useState<ProviderInstallRuntimeStatus | null>(null)
   const [installBusyProvider, setInstallBusyProvider] = useState<AgentProfile['provider'] | null>(null)
+  const [updateBusyProvider, setUpdateBusyProvider] = useState<AgentProfile['provider'] | null>(null)
   const [installFeedback, setInstallFeedback] = useState<string | null>(null)
 
   useEffect(() => {
@@ -496,6 +503,57 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }
 
+  const handleUpdateProvider = async (provider: AgentProfile['provider']) => {
+    const spec = installSpecs?.[provider]
+    if (!spec) {
+      return
+    }
+
+    if (providerRequiresNodeSetup(provider)) {
+      setInstallFeedback('Node.js のセットアップが必要です。上部の案内を確認してから再試行してください。')
+      return
+    }
+
+    const approved = window.confirm(
+      `${spec.label} を最新化します。\n\n実行コマンド:\n${spec.displayCommand}\n\n更新後にモデル候補を再取得します。続行しますか？`
+    )
+    if (!approved) {
+      return
+    }
+
+    setUpdateBusyProvider(provider)
+    setInstallFeedback(null)
+
+    try {
+      const data = await apiRequestJson<{
+        success?: boolean
+        command?: string
+        details?: string
+        error?: string
+      }>('/api/providers/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider })
+      })
+
+      if (!data.success) {
+        throw new Error(data.details || data.error || 'CLI の更新に失敗しました。')
+      }
+
+      await refreshProviderCatalogs(true)
+      setInstallFeedback(`${spec.label} を更新しました。モデル候補を再取得しました。`)
+    } catch (error) {
+      console.error(`Failed to update ${provider}:`, error)
+      if (error instanceof Error && /NODE_SETUP_REQUIRED/i.test(error.message)) {
+        setInstallFeedback('Node.js のセットアップが必要です。上部の案内を確認してから再試行してください。')
+      } else {
+        setInstallFeedback(`${spec.label} の更新に失敗しました。表示コマンドを手動で実行してください。`)
+      }
+    } finally {
+      setUpdateBusyProvider(null)
+    }
+  }
+
   const handleSave = () => {
     saveSettings()
     onClose()
@@ -522,7 +580,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         <div className="flex items-center justify-between border-b border-slate-700/60 px-6 py-5">
           <div>
             <h2 className="text-xl font-bold text-slate-100">設定・エージェント管理</h2>
-            <p className="mt-1 text-sm text-slate-400">スタンスと性格はパネル選択を中心に調整できます。</p>
+            <p className="mt-1 text-sm text-slate-400">役割を基点に、見る観点・スタンス・性格を調整できます。</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -550,7 +608,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <div className="flex items-center gap-4">
                 <h3 className="text-sm font-semibold uppercase tracking-wider text-cyan-400">CLI 状態</h3>
                 <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
-                  {!canUseNpmInstaller ? 'npm 系 CLI は Node.js が必要' : 'CLI をインストール'}
+                  {!canUseNpmInstaller ? 'npm 系 CLI は Node.js が必要' : 'CLI をインストール / 更新'}
                 </span>
               </div>
               <div className="rounded-full border border-slate-700/60 bg-slate-900/40 px-3 py-1 text-xs text-slate-400">
@@ -591,6 +649,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   : 'bg-rose-400 shadow-[0_0_14px_rgba(251,113,133,0.75)]'
                 const spec = installSpecs?.[provider] ?? null
                 const requiresNodeSetup = providerRequiresNodeSetup(provider)
+                const isProviderOperationBusy = installBusyProvider !== null || updateBusyProvider !== null
 
                 return (
                   <div key={provider} className="rounded-2xl border border-slate-700/60 bg-slate-900/35 p-4">
@@ -611,16 +670,27 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       {getProviderInstallCardMessage(isAvailable, Boolean(spec), requiresNodeSetup)}
                     </p>
 
-                    {!isAvailable && spec && (
+                    {spec && (
                       <div className="mt-3 space-y-2">
-                        <button
-                          type="button"
-                          onClick={() => void handleInstallProvider(provider)}
-                          disabled={installBusyProvider !== null || requiresNodeSetup}
-                          className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {installBusyProvider === provider ? 'インストール中...' : requiresNodeSetup ? 'Node.js が必要' : 'インストール'}
-                        </button>
+                        {isAvailable ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleUpdateProvider(provider)}
+                            disabled={isProviderOperationBusy || requiresNodeSetup}
+                            className="rounded-xl border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-200 transition-colors hover:border-amber-300 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {updateBusyProvider === provider ? '更新中...' : requiresNodeSetup ? 'Node.js が必要' : 'CLI を更新'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void handleInstallProvider(provider)}
+                            disabled={isProviderOperationBusy || requiresNodeSetup}
+                            className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {installBusyProvider === provider ? 'インストール中...' : requiresNodeSetup ? 'Node.js が必要' : 'インストール'}
+                          </button>
+                        )}
                         <p className="break-all whitespace-pre-wrap rounded-lg border border-slate-700/50 bg-slate-950/40 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
                           {spec.displayCommand}
                         </p>
@@ -979,7 +1049,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         />
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-sm font-medium text-slate-400">ロール</label>
+                        <label className="text-sm font-medium text-slate-400">参加区分</label>
                         <select
                           value={agent.role}
                           onChange={(event) => updateAgent(agent.id, { role: event.target.value as AgentProfile['role'] })}
@@ -992,112 +1062,107 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </div>
                     </div>
 
-                    <div className="mt-4 space-y-3 rounded-2xl border border-slate-700/50 bg-slate-950/20 p-4">
-                      <div className="grid gap-4 lg:grid-cols-[minmax(220px,0.75fr)_minmax(0,1.25fr)]">
-                        <div className="space-y-1.5">
-                          <label className="text-sm font-medium text-slate-400">視点ロール</label>
-                          <select
-                            value={agent.viewpointRoleId ?? ''}
-                            onChange={(event) => {
-                              const nextRoleId = event.target.value
-                                ? event.target.value as NonNullable<AgentProfile['viewpointRoleId']>
-                                : null
-                              updateAgent(agent.id, getViewpointRoleAgentUpdates(nextRoleId))
-                            }}
-                            className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
-                          >
-                            <option value="">標準（ロール指定なし）</option>
-                            {VIEWPOINT_ROLE_PRESETS.map((preset) => (
-                              <option key={preset.id} value={preset.id}>
-                                {preset.label}
-                              </option>
-                            ))}
-                          </select>
-                          <p className="text-xs leading-5 text-slate-500">
-                            選択すると標準のスタンス・性格・観点を適用します。必要なら下で調整できます。
-                          </p>
-                        </div>
+                    <div className="mt-4 space-y-4 rounded-2xl border border-slate-700/50 bg-slate-950/20 p-4">
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-medium text-slate-400">役割</label>
+                        <select
+                          value={agent.viewpointRoleId ?? ''}
+                          onChange={(event) => {
+                            const nextRoleId = event.target.value
+                              ? event.target.value as NonNullable<AgentProfile['viewpointRoleId']>
+                              : null
+                            updateAgent(agent.id, getViewpointRoleAgentUpdates(nextRoleId))
+                          }}
+                          className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-base text-slate-100 outline-none focus:border-cyan-500"
+                        >
+                          <option value="">標準（役割指定なし）</option>
+                          {VIEWPOINT_ROLE_PRESETS.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.label}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs leading-5 text-slate-500">
+                          {viewpointPreset?.description ?? '特定の職能や部門に寄せず、常識的でバランスのよい観点から会話します。'}
+                        </p>
+                      </div>
 
-                        <div className="space-y-3">
-                          <div className="rounded-xl border border-slate-700/50 bg-slate-900/45 px-3 py-3">
-                            <p className="text-sm font-semibold text-slate-100">
-                              {viewpointPreset?.label ?? '標準的な参加者'}
-                            </p>
-                            <p className="mt-1 text-xs leading-5 text-slate-400">
-                              {viewpointPreset?.description ?? '特定の職能や部門に寄せず、常識的でバランスのよい観点から会話します。'}
-                            </p>
-                            {viewpointPreset && (
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                {viewpointPreset.looksAt.map((item) => (
-                                  <span
-                                    key={item}
-                                    className="rounded-full border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1 text-[11px] text-cyan-200"
-                                  >
-                                    {item}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
+                      <div className="space-y-3 rounded-xl border border-slate-700/50 bg-slate-900/30 p-3">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+                          <span className="shrink-0 pt-0.5 text-sm font-semibold text-slate-300">見る観点</span>
+                          <div className="flex flex-wrap gap-2">
+                            {(viewpointPreset?.looksAt ?? ['全体バランス']).map((item) => (
+                              <span
+                                key={item}
+                                className="rounded-full border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1 text-[11px] text-cyan-200"
+                              >
+                                {item}
+                              </span>
+                            ))}
                           </div>
                         </div>
+
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <label className="space-y-1.5">
+                            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                              <span className="text-sm font-medium text-slate-400">重視する</span>
+                              <span className="text-xs text-slate-500">追加でカスタム設定できます。</span>
+                            </div>
+                            <textarea
+                              rows={2}
+                              value={agent.viewpointFocus}
+                              onChange={(event) => updateAgent(agent.id, { viewpointFocus: event.target.value })}
+                              placeholder="この立場で特に見てほしいこと"
+                              className="w-full resize-none rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500"
+                            />
+                          </label>
+                          <label className="space-y-1.5">
+                            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                              <span className="text-sm font-medium text-slate-400">避けること</span>
+                              <span className="text-xs text-slate-500">追加でカスタム設定できます。</span>
+                            </div>
+                            <textarea
+                              rows={2}
+                              value={agent.viewpointAvoid}
+                              onChange={(event) => updateAgent(agent.id, { viewpointAvoid: event.target.value })}
+                              placeholder="この役割で避けたい行動・判断"
+                              className="w-full resize-none rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500"
+                            />
+                          </label>
+                        </div>
                       </div>
 
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <label className="space-y-1.5">
-                          <span className="text-sm font-medium text-slate-400">重視する観点</span>
-                          <textarea
-                            rows={3}
-                            value={agent.viewpointFocus}
-                            onChange={(event) => updateAgent(agent.id, { viewpointFocus: event.target.value })}
-                            placeholder="この立場で特に見てほしいこと"
-                            className="w-full resize-none rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500"
-                          />
-                        </label>
-                        <label className="space-y-1.5">
-                          <span className="text-sm font-medium text-slate-400">避ける振る舞い</span>
-                          <textarea
-                            rows={3}
-                            value={agent.viewpointAvoid}
-                            onChange={(event) => updateAgent(agent.id, { viewpointAvoid: event.target.value })}
-                            placeholder="この立場で偏りすぎてほしくないこと"
-                            className="w-full resize-none rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500"
-                          />
-                        </label>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">スタンス</label>
+                          <button
+                            type="button"
+                            onClick={() => setOpenPanel(isStanceOpen ? null : { agentId: agent.id, type: 'stance' })}
+                            className="flex w-full items-start justify-between gap-3 rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-left text-base text-slate-100 transition-colors hover:border-cyan-500/50"
+                          >
+                            <span className="min-w-0 whitespace-normal break-words text-sm leading-6">{stanceDisplay}</span>
+                            <ChevronDown size={14} className={`ml-2 shrink-0 text-slate-500 transition-transform ${isStanceOpen ? 'rotate-180' : ''}`} />
+                          </button>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-slate-400">性格</label>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenPanel(isPersonalityOpen ? null : { agentId: agent.id, type: 'personality' })
+                            }
+                            className="flex w-full items-start justify-between gap-3 rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-left text-base text-slate-100 transition-colors hover:border-cyan-500/50"
+                          >
+                            <span className="min-w-0 whitespace-normal break-words text-sm leading-6">{personalityDisplay}</span>
+                            <ChevronDown
+                              size={14}
+                              className={`ml-2 shrink-0 text-slate-500 transition-transform ${isPersonalityOpen ? 'rotate-180' : ''}`}
+                            />
+                          </button>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="mt-4 grid gap-4 md:grid-cols-2">
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-medium text-slate-400">スタンス（意見の方向性）</label>
-                        <button
-                          type="button"
-                          onClick={() => setOpenPanel(isStanceOpen ? null : { agentId: agent.id, type: 'stance' })}
-                          className="flex w-full items-start justify-between gap-3 rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-left text-base text-slate-100 transition-colors hover:border-cyan-500/50"
-                        >
-                          <span className="min-w-0 whitespace-normal break-words text-sm leading-6">{stanceDisplay}</span>
-                          <ChevronDown size={14} className={`ml-2 shrink-0 text-slate-500 transition-transform ${isStanceOpen ? 'rotate-180' : ''}`} />
-                        </button>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-medium text-slate-400">性格（パーソナリティ）</label>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setOpenPanel(isPersonalityOpen ? null : { agentId: agent.id, type: 'personality' })
-                          }
-                          className="flex w-full items-start justify-between gap-3 rounded-xl border border-slate-600 bg-slate-800 px-3 py-2.5 text-left text-base text-slate-100 transition-colors hover:border-cyan-500/50"
-                        >
-                          <span className="min-w-0 whitespace-normal break-words text-sm leading-6">{personalityDisplay}</span>
-                          <ChevronDown
-                            size={14}
-                            className={`ml-2 shrink-0 text-slate-500 transition-transform ${isPersonalityOpen ? 'rotate-180' : ''}`}
-                          />
-                        </button>
-                      </div>
-                    </div>
-
-                    {isStanceOpen && (
-                      <div className="mt-4 space-y-4 rounded-2xl border border-slate-700/50 bg-slate-900/25 p-4">
+                      {isStanceOpen && (
                         <SelectionPanel
                           title="スタンス"
                           presets={STANCE_PRESETS}
@@ -1115,11 +1180,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             clearCustomValue(agent.id, 'stance')
                           }}
                         />
-                      </div>
-                    )}
+                      )}
 
-                    {isPersonalityOpen && (
-                      <div className="mt-4 space-y-4 rounded-2xl border border-slate-700/50 bg-slate-900/25 p-4">
+                      {isPersonalityOpen && (
                         <SelectionPanel
                           title="性格"
                           presets={PERSONALITY_PRESETS}
@@ -1139,8 +1202,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             clearCustomValue(agent.id, 'personality')
                           }}
                         />
-                      </div>
-                    )}
+                      )}
+                    </div>
 
                     <div className="mt-4 grid gap-4 xl:grid-cols-3">
                       <div className="space-y-1.5">

@@ -5,8 +5,8 @@ import { hasCopilotSdkRuntime, runCli, type AgentCliProvider, type ReasoningEffo
 import { loadInputContext } from './contextLoader'
 import { pickFilesDialog, pickFolderDialog } from './nativeDialog'
 import { MeetingOrchestrator, type RunTurnRequest } from './orchestrator'
-import { getProviderCatalogs } from './providerCatalog'
-import { getProviderInstallRuntimeStatus, getProviderInstallSpec, installProviderCli } from './providerInstaller'
+import { clearProviderCatalogCache, getProviderCatalogs } from './providerCatalog'
+import { getProviderInstallRuntimeStatus, getProviderInstallSpec, installProviderCli, updateProviderCli } from './providerInstaller'
 
 dotenv.config()
 
@@ -31,6 +31,11 @@ app.get('/api/health', (_req, res) => {
 })
 
 const orchestrator = new MeetingOrchestrator(runCli)
+const supportedProviders: AgentCliProvider[] = ['codex', 'gemini', 'copilot', 'claude']
+
+function isSupportedProvider(value: unknown): value is AgentCliProvider {
+  return typeof value === 'string' && supportedProviders.includes(value as AgentCliProvider)
+}
 
 app.get('/api/providers/catalogs', async (req, res) => {
   try {
@@ -76,7 +81,7 @@ app.get('/api/providers/install-info', async (_req, res) => {
 app.post('/api/providers/install', async (req, res) => {
   try {
     const { provider } = req.body as { provider?: AgentCliProvider }
-    if (!provider || !['codex', 'gemini', 'copilot', 'claude'].includes(provider)) {
+    if (!isSupportedProvider(provider)) {
       res.status(400).json({
         success: false,
         error: 'Bad Request',
@@ -86,6 +91,7 @@ app.post('/api/providers/install', async (req, res) => {
     }
 
     const result = await installProviderCli(provider)
+    clearProviderCatalogCache()
     res.json({
       success: true,
       provider,
@@ -96,6 +102,38 @@ app.post('/api/providers/install', async (req, res) => {
   } catch (error) {
     const isPrerequisiteError = error instanceof Error && /NODE_SETUP_REQUIRED/i.test(error.message)
     console.error('[API] Error while installing provider CLI:', error)
+    res.status(isPrerequisiteError ? 409 : 500).json({
+      success: false,
+      error: isPrerequisiteError ? 'Prerequisite Required' : 'Internal Server Error',
+      details: isPrerequisiteError ? 'NODE_SETUP_REQUIRED' : String(error)
+    })
+  }
+})
+
+app.post('/api/providers/update', async (req, res) => {
+  try {
+    const { provider } = req.body as { provider?: AgentCliProvider }
+    if (!isSupportedProvider(provider)) {
+      res.status(400).json({
+        success: false,
+        error: 'Bad Request',
+        details: '更新対象の CLI が不正です。'
+      })
+      return
+    }
+
+    const result = await updateProviderCli(provider)
+    clearProviderCatalogCache()
+    res.json({
+      success: true,
+      provider,
+      command: result.spec.displayCommand,
+      stdout: result.stdout,
+      stderr: result.stderr
+    })
+  } catch (error) {
+    const isPrerequisiteError = error instanceof Error && /NODE_SETUP_REQUIRED/i.test(error.message)
+    console.error('[API] Error while updating provider CLI:', error)
     res.status(isPrerequisiteError ? 409 : 500).json({
       success: false,
       error: isPrerequisiteError ? 'Prerequisite Required' : 'Internal Server Error',
