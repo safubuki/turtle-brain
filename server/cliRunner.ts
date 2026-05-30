@@ -213,6 +213,14 @@ export function hasCopilotSdkRuntime(): boolean {
   return getCopilotSdkModulePath() !== null
 }
 
+function isCopilotAuthError(detail: string): boolean {
+  return (
+    /Session was not created with authentication info or custom provider/i.test(detail) ||
+    /\bnot (?:logged in|authenticated|signed in)\b/i.test(detail) ||
+    /\bauthentication (?:required|failed)\b/i.test(detail)
+  )
+}
+
 function resolveCliLauncher(provider: AgentCliProvider): CliLauncher {
   const scriptPath = getCliScriptPath(provider)
 
@@ -534,7 +542,12 @@ async function runCopilotViaSdk(
 
     child.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error(stderr.trim() || stdout.trim() || `copilot bridge exited with code ${code}`))
+        const detail = stderr.trim() || stdout.trim() || `copilot bridge exited with code ${code}`
+        if (isCopilotAuthError(detail)) {
+          reject(new Error(`COPILOT_AUTH_REQUIRED: ${detail}`))
+          return
+        }
+        reject(new Error(detail))
         return
       }
 

@@ -1103,6 +1103,9 @@ function App() {
                           <div className="min-w-0">
                             <h3 className="truncate text-lg font-bold text-slate-100">{agent.name}</h3>
                             <p className="text-sm text-slate-400">{formatAgentRole(agent.role)}</p>
+                            <p className="mt-0.5 truncate text-xs font-medium text-cyan-300/90">
+                              役割: {getViewpointRolePreset(agent.viewpointRoleId)?.label ?? '標準（指定なし）'}
+                            </p>
                           </div>
                         </div>
 
@@ -1323,8 +1326,12 @@ function App() {
                 <div className="mb-5 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <h4 className="text-lg font-semibold text-emerald-200">{finalConclusionStructured.title}</h4>
-                    <span className="rounded-full border border-emerald-400/30 px-3 py-1 text-xs font-medium text-emerald-200">
+                    <span
+                      title="「信頼度」は、結論を生成したAIが自己申告したスコアです（0〜100）。客観的に測定した値ではなく、結論の確からしさ・十分さに対するAI自身の主観的な自己評価です。下に表示される理由とあわせて、どこが弱いかの目安として参照してください。"
+                      className="inline-flex cursor-help items-center gap-1 rounded-full border border-emerald-400/30 px-3 py-1 text-xs font-medium text-emerald-200"
+                    >
                       信頼度 {finalConclusionStructured.confidence.score} / 100
+                      <span aria-hidden className="text-emerald-300/80">ⓘ</span>
                     </span>
                   </div>
                   <p className="mt-2 text-sm leading-6 text-emerald-100/90">{finalConclusionStructured.confidence.reason}</p>

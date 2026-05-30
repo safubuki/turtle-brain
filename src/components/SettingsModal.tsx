@@ -349,6 +349,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     clearSavedSettings,
     turnLimit,
     setTurnLimit,
+    openingSpeakerId,
+    setOpeningSpeakerId,
     environment,
     executionMode,
     setExecutionMode,
@@ -818,6 +820,29 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-slate-200 outline-none focus:border-cyan-500"
                 />
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm text-slate-400">最初の話者（口火）</label>
+              <select
+                value={openingSpeakerId ?? ''}
+                onChange={(event) => setOpeningSpeakerId(event.target.value || null)}
+                className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-slate-200 outline-none focus:border-cyan-500"
+              >
+                <option value="">自動（役割ベースで判定）</option>
+                {agents
+                  .filter((agent) => agent.role === 'Participant')
+                  .map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+              </select>
+              <p className="text-xs leading-5 text-slate-500">
+                自動では、各エージェントの「役割（視点ロール）」を主軸に最初の話者を選びます。実装・提案系の役割（例: 開発担当者）が口火を切り、経営・監督・評価系の役割（例: 経営・事業責任）は後から問いを立てる側になりやすくなります。役割が同等のときだけ、議題内容からAIが判定します。
+                特定のエージェントを選べば、そのエージェントが必ず口火を切ります（会議モードではファシリテータの論点整理のあとに最初に発言します）。
+                ※ 各エージェントの役割はエージェント設定の「役割」で変更できます。
+              </p>
             </div>
 
           </section>

@@ -183,6 +183,7 @@ export interface RunTurnRequest {
   discussionStyle: DiscussionStyle
   handRaiseMode?: HandRaiseMode
   turnLimit: number
+  openingSpeakerId?: string | null
   agents: AgentProfileInput[]
 }
 
@@ -253,6 +254,8 @@ interface MeetingSession {
   discussionStyle: DiscussionStyle
   handRaiseMode: HandRaiseMode
   turnLimit: number
+  openingSpeakerId: string | null
+  pendingOpeningSpeakerId: string | null
   currentTurn: number
   status: 'idle' | 'running' | 'finished'
   agents: RuntimeAgent[]
@@ -503,6 +506,30 @@ function getAgentViewpointLabel(agent: Pick<AgentProfileInput, 'viewpointRoleId'
   return agent.viewpointRoleId ? VIEWPOINT_ROLE_LABELS[agent.viewpointRoleId] ?? agent.viewpointRoleId : '標準'
 }
 
+// 口火（最初の発言者）の向き不向きを役割で表す。小さいほど「最初に具体を出す提案・実装側」、
+// 大きいほど「後から問いを立てる経営・監督・評価側」。ユーザーの想定する自然な流れ
+// （実装/提案 → 経営が経営視点で問いを立てて深める）に合わせている。
+const OPENING_ROLE_PRIORITY: Record<AgentViewpointRoleId, number> = {
+  'technical-practice': 0,
+  'research-development': 1,
+  'project-management': 2,
+  operations: 3,
+  'sales-market': 4,
+  'customer-user': 5,
+  'people-organization': 6,
+  'quality-qms': 7,
+  'finance-accounting': 8,
+  'legal-compliance-ip': 9,
+  'security-risk': 10,
+  'executive-business': 11
+}
+
+const NEUTRAL_OPENING_PRIORITY = 6
+
+function getOpeningRolePriority(agent: Pick<AgentProfileInput, 'viewpointRoleId'>): number {
+  return agent.viewpointRoleId ? OPENING_ROLE_PRIORITY[agent.viewpointRoleId] ?? NEUTRAL_OPENING_PRIORITY : NEUTRAL_OPENING_PRIORITY
+}
+
 function formatAgentPerspectiveForPrompt(
   agent: Pick<AgentProfileInput, 'viewpointRoleId' | 'viewpointFocus' | 'viewpointAvoid'>
 ): string {
@@ -513,6 +540,17 @@ function formatAgentPerspectiveForPrompt(
   ].filter(Boolean)
 
   return lines.join('\n')
+}
+
+// 役割ごとの「目線の高さ（altitude）」を守らせるための指示。経営者が実装詳細を細かく
+// 突くのではなく、価値・採算・優先順位といった経営目線でかみ合うようにする等、
+// 各エージェントが自分の役割の関心事を主役にして話すよう促す。
+function buildRoleAltitudeInstruction(agent: Pick<AgentProfileInput, 'viewpointRoleId'>): string {
+  return [
+    `Stay at the altitude of your viewpoint role (${getAgentViewpointLabel(agent)}). Lead with the concerns, value judgments, and questions that this role owns, using your "Primary viewpoint focus" above.`,
+    'For a business or management role, lead with value, who would pay, cost and return on investment, market fit, and priority — rather than interrogating fine implementation details.',
+    "When you react to another participant, engage from your own role's concerns instead of diving into the technical or operational detail that belongs to their role."
+  ].join(' ')
 }
 
 function formatAgentProfilesForPrompt(agents: RuntimeAgent[]): string {
@@ -1089,6 +1127,8 @@ export class MeetingOrchestrator {
       discussionStyle: input.discussionStyle,
       handRaiseMode: input.handRaiseMode ?? 'ai-evaluation',
       turnLimit: input.turnLimit,
+      openingSpeakerId: input.openingSpeakerId ?? null,
+      pendingOpeningSpeakerId: null,
       currentTurn: 1,
       status: 'idle',
       agents: input.agents.map(cloneAgent),
@@ -1139,8 +1179,104 @@ export class MeetingOrchestrator {
     }
   }
 
+  private getOpeningSpeakerPool(session: MeetingSession): RuntimeAgent[] {
+    const participants = session.agents.filter((agent) => agent.role === 'Participant')
+    return session.discussionStyle === 'conversation' ? participants.slice(0, 2) : participants
+  }
+
+  private async resolveOpeningSpeaker(session: MeetingSession): Promise<{ speaker: RuntimeAgent; reason: string }> {
+    const pool = this.getOpeningSpeakerPool(session)
+
+    if (pool.length === 0) {
+      return { speaker: session.agents[0], reason: '参加者がいないため先頭エージェントを選択しました。' }
+    }
+
+    if (session.openingSpeakerId) {
+      const manual = pool.find((agent) => agent.id === session.openingSpeakerId)
+      if (manual) {
+        return { speaker: manual, reason: `設定で最初の話者に指定された ${manual.name} を選択しました。` }
+      }
+    }
+
+    if (pool.length === 1) {
+      return { speaker: pool[0], reason: `参加者が ${pool[0].name} のみのため自動選択しました。` }
+    }
+
+    // 役割（視点ロール）を主軸に決める。提案・実装側が口火を切り、経営・監督・評価側は
+    // 後から問いを立てる、というユーザーの想定する自然な流れに沿わせる。
+    const ranked = pool
+      .map((agent, index) => ({ agent, index, priority: getOpeningRolePriority(agent) }))
+      .sort(
+        (left, right) =>
+          left.priority - right.priority ||
+          left.agent.speakCount - right.agent.speakCount ||
+          left.index - right.index
+      )
+
+    const topPriority = ranked[0].priority
+    const tied = ranked.filter((entry) => entry.priority === topPriority)
+
+    if (tied.length === 1) {
+      const picked = ranked[0].agent
+      return {
+        speaker: picked,
+        reason: `役割「${getAgentViewpointLabel(picked)}」が最初に具体案を出すのに向くため ${picked.name} を選択しました。`
+      }
+    }
+
+    // 役割の優先度が同じ（同種の役割、または役割未設定）の場合のみ、議題と内容からAIで判定する。
+    const aiPick = await this.selectOpeningSpeakerViaAi(session, tied.map((entry) => entry.agent))
+    if (aiPick) {
+      return aiPick
+    }
+
+    const fallback = ranked[0].agent
+    return { speaker: fallback, reason: `役割が同等のため既定順で ${fallback.name} を選択しました。` }
+  }
+
+  private async selectOpeningSpeakerViaAi(
+    session: MeetingSession,
+    pool: RuntimeAgent[]
+  ): Promise<{ speaker: RuntimeAgent; reason: string } | null> {
+    const judge = session.agents.find((agent) => agent.role === 'Facilitator') ?? pool[0]
+    const profiles = pool
+      .map(
+        (agent) =>
+          `- id=${agent.id} / name=${agent.name} / viewpoint=${getAgentViewpointLabel(agent)} / stance=${agent.stance} / personality=${agent.personality}${agent.viewpointFocus ? ` / focus=${agent.viewpointFocus}` : ''}`
+      )
+      .join('\n')
+
+    const prompt = [
+      getSafeSharedPromptContext(session),
+      'Decide which single participant should speak first to open this discussion.',
+      'The opener should be whoever can most naturally put the first concrete substance on the table, so the others can then respond, question, or critique from their own viewpoints.',
+      'For example, when the topic asks to propose, design, or build something, a hands-on / implementation-oriented viewpoint usually opens, while business, oversight, or evaluation viewpoints respond afterward to deepen it.',
+      `Participants:\n${profiles}`,
+      'Return JSON only.',
+      '{"agentId":"the id of the opening participant","reason":"short Japanese reason"}'
+    ].join('\n\n')
+
+    try {
+      const result = await this.runMetaCli(judge.provider, judge.model, judge.reasoningEffort, prompt)
+      const parsed = extractJson<{ agentId?: string; reason?: string }>(result.response)
+      const picked = pool.find((agent) => agent.id === parsed?.agentId)
+      if (picked) {
+        return { speaker: picked, reason: asString(parsed?.reason, `議題と役割からAIが ${picked.name} を最初の話者に選びました。`) }
+      }
+    } catch {
+      // Fall back to the default ordering below.
+    }
+
+    return null
+  }
+
   private async runConversationTurn(session: MeetingSession): Promise<void> {
-    const speaker = getNextConversationSpeaker(session)
+    const isOpeningTurn = session.messages.length === 0
+    const opening = isOpeningTurn ? await this.resolveOpeningSpeaker(session) : null
+    const speaker = opening ? opening.speaker : getNextConversationSpeaker(session)
+    const dispatchReason = opening
+      ? `Conversation 開始: ${opening.reason}`
+      : 'Conversation モードのため、直前の発話者と異なる参加者を選択しました。'
     const prompt = this.buildConversationPromptV2(session, speaker)
     const startedAt = Date.now()
     const result = await this.runCli({
@@ -1168,7 +1304,7 @@ export class MeetingOrchestrator {
       turn: session.currentTurn,
       executionMode: session.executionMode,
       selectedSpeakerId: speaker.id,
-      dispatchReason: 'Conversation モードのため、直前の発話者と異なる参加者を選択しました。',
+      dispatchReason,
       facilitator: null,
       deliberationState: session.deliberationState,
       convergenceDecision: session.convergenceDecision,
@@ -1225,12 +1361,32 @@ export class MeetingOrchestrator {
       const message = this.recordMessage(session, facilitator, result.response, 'moderation')
       this.deliverMessage(session, facilitator.id, message)
 
+      let openingDispatchNote = ''
+      if (session.openingSpeakerId) {
+        const opener = participants.find((agent) => agent.id === session.openingSpeakerId)
+        if (opener) {
+          session.pendingOpeningSpeakerId = opener.id
+          opener.inbox = trimMailbox([
+            ...opener.inbox,
+            {
+              id: randomUUID(),
+              fromAgentId: facilitator.id,
+              kind: 'facilitator-note',
+              content: '最初の発言者として議論の口火を切ってください。',
+              summary: 'ファシリテータ指示: 最初に口火を切る',
+              timestamp: Date.now()
+            }
+          ])
+          openingDispatchNote = ` 次は設定で指定された ${opener.name} が最初に発言します。`
+        }
+      }
+
       session.debug = {
         sessionId: session.id,
         turn: session.currentTurn,
         executionMode: session.executionMode,
         selectedSpeakerId: facilitator.id,
-        dispatchReason: '会議開始時のため、ファシリテータが最初の論点整理を行いました。',
+        dispatchReason: `会議開始時のため、ファシリテータが最初の論点整理を行いました。${openingDispatchNote}`,
         facilitator: {
           agentId: facilitator.id,
           runtimeSessionId: facilitator.runtimeSessionId,
@@ -1842,8 +1998,10 @@ export class MeetingOrchestrator {
 
     const parts = [
       getSafeSharedPromptContext(session),
-      `You are ${speaker.name}. Your stance is "${speaker.stance}". Your personality is "${speaker.personality}".`,
+      `You are ${speaker.name}.`,
       formatAgentPerspectiveForPrompt(speaker),
+      buildRoleAltitudeInstruction(speaker),
+      `Your configured stance "${speaker.stance}" and personality "${speaker.personality}" set your tone and emphasis, but they must not pull you away from your viewpoint role's altitude and concerns above.`,
       getSafeReasoningGuidance(speaker.reasoningEffort)
     ]
 
@@ -2145,6 +2303,19 @@ export class MeetingOrchestrator {
     facilitator: RuntimeAgent | null
   ): { speakers: RuntimeAgent[]; dispatchReason: string } {
     const participants = session.agents.filter((agent) => agent.role === 'Participant')
+
+    if (session.pendingOpeningSpeakerId) {
+      const forcedId = session.pendingOpeningSpeakerId
+      session.pendingOpeningSpeakerId = null
+      const forced = participants.find((agent) => agent.id === forcedId)
+      if (forced) {
+        return {
+          speakers: [forced],
+          dispatchReason: `設定で指定された最初の話者 ${forced.name} を優先しました。`
+        }
+      }
+    }
+
     const maxSpeakCount = Math.max(...participants.map((agent) => agent.speakCount), 0)
     const speakCountSpread = getSpeakCountSpread(participants)
     const deliberationIssues = [
@@ -2306,8 +2477,10 @@ export class MeetingOrchestrator {
     const scoreInfo = scores.find((entry) => entry.agentId === speaker.id)
     return [
       getSafeSharedPromptContext(session),
-      `You are ${speaker.name}. Your stance is "${speaker.stance}". Your personality is "${speaker.personality}".`,
+      `You are ${speaker.name}.`,
       formatAgentPerspectiveForPrompt(speaker),
+      buildRoleAltitudeInstruction(speaker),
+      `Your configured stance "${speaker.stance}" and personality "${speaker.personality}" set your tone and emphasis, but they must not pull you away from your viewpoint role's altitude and concerns above.`,
       getSafeReasoningGuidance(speaker.reasoningEffort),
       selfHistory ? `Your own recent messages:\n${selfHistory}` : '',
       lastOtherMessage ? `Most recent message from another agent:\n${lastOtherMessage}` : '',

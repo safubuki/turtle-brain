@@ -212,6 +212,7 @@ interface TurtleBrainState {
   handRaiseMode: HandRaiseMode
   executionMode: ExecutionMode
   discussionStyle: DiscussionStyle
+  openingSpeakerId: string | null
   messages: Message[]
   sessionStatus: 'idle' | 'running' | 'finished'
   finalConclusion: string | null
@@ -228,6 +229,7 @@ interface TurtleBrainState {
   setExecutionMode: (mode: ExecutionMode) => void
   setDiscussionStyle: (style: DiscussionStyle) => void
   setTurnLimit: (limit: number) => void
+  setOpeningSpeakerId: (id: string | null) => void
   addAgent: (agent: AgentProfile) => void
   updateAgent: (id: string, updates: Partial<AgentProfile>) => void
   removeAgent: (id: string) => void
@@ -819,6 +821,7 @@ interface PersistedSettingsSnapshot {
   executionMode: ExecutionMode
   handRaiseMode: HandRaiseMode
   turnLimit: number
+  openingSpeakerId: string | null
   agents: AgentProfile[]
 }
 
@@ -861,12 +864,19 @@ function loadPersistedSettings(): PersistedSettingsSnapshot | null {
       ? sanitizeAgents(parsed.agents as AgentProfile[])
       : fallbackAgents
 
+    const openingSpeakerId =
+      typeof parsed.openingSpeakerId === 'string' &&
+      agents.some((agent) => agent.id === parsed.openingSpeakerId && agent.role === 'Participant')
+        ? parsed.openingSpeakerId
+        : null
+
     return {
       version: 1,
       discussionStyle,
       executionMode,
       handRaiseMode,
       turnLimit,
+      openingSpeakerId,
       agents
     }
   } catch {
@@ -913,7 +923,25 @@ async function ensureCopilotBackendReady(agents: AgentProfile[]): Promise<void> 
   throw new Error('COPILOT_BACKEND_OUTDATED')
 }
 
+const COPILOT_AUTH_MESSAGE =
+  'GitHub Copilot CLI の認証が完了していません。ターミナルで `copilot login` を実行してブラウザ認証を済ませるか、COPILOT_GITHUB_TOKEN（または GH_TOKEN / GITHUB_TOKEN）環境変数に Copilot 利用可能なトークンを設定したうえで、server を再起動して再試行してください。'
+
+function isCopilotAuthErrorText(text: string | undefined): boolean {
+  if (!text) {
+    return false
+  }
+
+  return (
+    /COPILOT_AUTH_REQUIRED/i.test(text) ||
+    /Session was not created with authentication info or custom provider/i.test(text)
+  )
+}
+
 function getAgentInteractionErrorMessage(error: unknown, details?: string): string {
+  if (isCopilotAuthErrorText(details) || (error instanceof Error && isCopilotAuthErrorText(error.message))) {
+    return COPILOT_AUTH_MESSAGE
+  }
+
   if (details && /COPILOT_BACKEND_OUTDATED/i.test(details)) {
     return 'GitHub Copilot CLI の継続会話には新しいバックエンドが必要です。現在は古い server が 3001 番ポートに残っている可能性があります。server を再起動してください。'
   }
@@ -1028,6 +1056,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
   handRaiseMode: initialHandRaiseMode,
   executionMode: initialExecutionMode,
   discussionStyle: initialDiscussionStyle,
+  openingSpeakerId: persistedSettings?.openingSpeakerId ?? null,
   messages: [],
   sessionStatus: 'idle',
   finalConclusion: null,
@@ -1065,6 +1094,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       return {
         discussionStyle,
         ...defaults,
+        openingSpeakerId: null,
         handRaiseMode: getEffectiveHandRaiseMode(discussionStyle, state.executionMode, defaults.handRaiseMode),
         messages: [],
         currentTurn: 0,
@@ -1079,6 +1109,8 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
     }),
 
   setTurnLimit: (turnLimit) => set({ turnLimit }),
+
+  setOpeningSpeakerId: (openingSpeakerId) => set({ openingSpeakerId }),
 
   addAgent: (agent) =>
     set((state) => ({
@@ -1106,12 +1138,14 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
 
   removeAgent: (id) =>
     set((state) => ({
-      agents: state.agents.filter((agent) => agent.id !== id)
+      agents: state.agents.filter((agent) => agent.id !== id),
+      openingSpeakerId: state.openingSpeakerId === id ? null : state.openingSpeakerId
     })),
 
   resetAgentsToDefault: () =>
     set((state) => ({
-      agents: getDiscussionStyleDefaults(state.discussionStyle).agents
+      agents: getDiscussionStyleDefaults(state.discussionStyle).agents,
+      openingSpeakerId: null
     })),
 
   resetAgentToDefault: (id) =>
@@ -1135,6 +1169,11 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       executionMode: state.executionMode,
       handRaiseMode: getEffectiveHandRaiseMode(state.discussionStyle, state.executionMode, state.handRaiseMode),
       turnLimit: state.turnLimit,
+      openingSpeakerId:
+        state.openingSpeakerId &&
+        state.agents.some((agent) => agent.id === state.openingSpeakerId && agent.role === 'Participant')
+          ? state.openingSpeakerId
+          : null,
       agents: sanitizeAgents(state.agents)
     })
   },
@@ -1156,6 +1195,7 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
       handRaiseMode: defaults.handRaiseMode,
       executionMode: 'orchestration',
       discussionStyle: defaultStyle,
+      openingSpeakerId: null,
       messages: [],
       sessionStatus: 'idle',
       finalConclusion: null,
@@ -1312,6 +1352,11 @@ export const useStore = create<TurtleBrainState>((set, get) => ({
           discussionStyle: state.discussionStyle,
           handRaiseMode: getEffectiveHandRaiseMode(state.discussionStyle, state.executionMode, state.handRaiseMode),
           turnLimit: state.turnLimit,
+          openingSpeakerId:
+            state.openingSpeakerId &&
+            state.agents.some((agent) => agent.id === state.openingSpeakerId && agent.role === 'Participant')
+              ? state.openingSpeakerId
+              : null,
           agents: state.agents
         })
       })
