@@ -138,6 +138,23 @@ test('収束時に構造化された最終整理を返す', async () => {
   assert.equal(finalTurn.debug?.convergenceDecision?.readyToConclude, true)
 })
 
+test('議論状態分析はバックグラウンド実行され、次ターンの debug に worker が引き継がれる', async () => {
+  const orchestrator = new MeetingOrchestrator(createFakeRunner())
+  const firstTurn = await orchestrator.runTurn(createBaseRequest({ turnLimit: 3 }))
+
+  // 発話直後に応答が返るため、同一ターンの debug には deliberation worker は含まれない。
+  assert.equal(firstTurn.debug?.workers.some((worker) => worker.kind === 'deliberation'), false)
+
+  const secondTurn = await orchestrator.runTurn(createBaseRequest({
+    turnLimit: 3,
+    sessionId: firstTurn.sessionId
+  }))
+
+  // 前ターンの分析結果(議論状態と worker 実行記録)は次ターンに反映される。
+  assert.equal(secondTurn.debug?.workers.some((worker) => worker.kind === 'deliberation'), true)
+  assert.equal(secondTurn.debug?.deliberationState?.convergence.status, 'ready_to_conclude')
+})
+
 test('Autonomous Conversation は action を集約して発話を採用する', async () => {
   const orchestrator = new MeetingOrchestrator(createFakeRunner())
   const response = await orchestrator.runTurn(createBaseRequest({

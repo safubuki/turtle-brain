@@ -18,6 +18,26 @@ Turtle Brain は、会話の進行役だけを共通化し、応答は Codex・G
 - npm
 - Codex CLI が利用可能であること
 
+### Windows: PowerShell の実行ポリシー
+
+Windows の初期設定ではスクリプト実行が無効のため、PowerShell で `npm` コマンドを実行すると
+「このシステムではスクリプトの実行が無効になっているため…」というエラーになることがあります。
+その場合は、PowerShell で以下を一度実行してください(現在のユーザーのみに適用され、管理者権限は不要です)。
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+### 各 CLI のログイン
+
+一部の CLI は、インストールしただけでは使えず、初回にログイン操作が必要です。
+未ログインのままだと、会話実行時の認証エラーや、設定画面のモデル一覧が既定の候補だけになる原因になります。
+
+- GitHub Copilot CLI: ターミナルで `copilot` を起動し、`/login` で GitHub にログイン
+- Codex CLI: `codex` を起動してログイン(ブラウザ認証)
+- Gemini CLI: `gemini` を起動してログイン(ブラウザ認証)
+- Claude Code: `claude` を起動してログイン(ブラウザ認証)
+
 依存関係をインストールします。
 
 ```powershell

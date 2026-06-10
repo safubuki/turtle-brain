@@ -258,3 +258,9 @@ app.post('/api/orchestrator/stop', async (req, res) => {
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`)
 })
+
+// モデルカタログを起動直後にバックグラウンドで温めておき、
+// 最初の会話ターンが CLI のモデル探索(数秒〜数十秒)を待たされないようにする。
+void getProviderCatalogs().catch((error) => {
+  console.error('[Startup] Provider catalog prewarm failed:', error)
+})

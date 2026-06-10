@@ -85,7 +85,20 @@ function getNpmCommand(): string {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm'
 }
 
+// npm のグローバルルートはプロセス存続中に変わらないため一度だけ解決する。
+// `npm root -g` は Windows ではプロセス起動だけで数百ms〜1秒超かかり、
+// 毎ターンの CLI 呼び出しごとに同期実行するとそのまま応答遅延になる。
+let cachedNpmGlobalBinRoot: string | null | undefined
+
 function getNpmGlobalBinRoot(): string | null {
+  if (cachedNpmGlobalBinRoot === undefined) {
+    cachedNpmGlobalBinRoot = resolveNpmGlobalBinRoot()
+  }
+
+  return cachedNpmGlobalBinRoot
+}
+
+function resolveNpmGlobalBinRoot(): string | null {
   try {
     const rawRoot = execFileSync(getNpmCommand(), ['root', '-g'], {
       encoding: 'utf8',
@@ -146,11 +159,19 @@ function getCliCommandPath(provider: AgentCliProvider): string {
   }
 }
 
+// Claude Code のネイティブインストーラ(install.cmd / install.sh)は CLI を
+// ~/.local/bin に配置するが、このディレクトリは PATH に載っていないことがある。
+function getUserLocalBinRoot(): string | null {
+  const home = process.env.USERPROFILE ?? process.env.HOME
+  return home ? path.join(home, '.local', 'bin') : null
+}
+
 function findCommandPath(commandName: string, preferredRoot?: string): string | null {
   const extensions = process.platform === 'win32' ? ['.cmd', '.exe', ''] : ['']
   const roots = dedupeStrings([
     preferredRoot,
     ...getCandidateNpmRoots(),
+    getUserLocalBinRoot(),
     ...(process.env.PATH?.split(path.delimiter) ?? [])
   ])
 

@@ -665,12 +665,17 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </div>
                     </div>
 
-                    <p className="mt-3 text-xs leading-5 text-slate-500">
+                    <p className="mt-3 break-all text-xs leading-5 text-slate-500">
                       {catalog?.source ? `検出元: ${catalog.source}` : '検出情報なし'}
                     </p>
                     <p className="mt-1 text-xs leading-5 text-slate-500">
                       {getProviderInstallCardMessage(isAvailable, Boolean(spec), requiresNodeSetup)}
                     </p>
+                    {catalog?.error && (
+                      <p className="mt-1 break-all text-xs leading-5 text-amber-300/90">
+                        {catalog.error}
+                      </p>
+                    )}
 
                     {spec && (
                       <div className="mt-3 space-y-2">

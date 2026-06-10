@@ -267,6 +267,11 @@ interface MeetingSession {
   debug: OrchestratorDebugSnapshot | null
   log: OrchestratorDebugSnapshot['log']
   stopRequested: boolean
+  // 直前ターンの議論状態分析。発話を返した後にバックグラウンドで実行し、
+  // 次ターンの開始時に await することで、分析待ちがユーザーの体感遅延に乗らないようにする。
+  // 分析プロンプトの入力(発話ログ)は従来の直列実行と完全に同一。
+  pendingAnalysis: Promise<OrchestratorDebugSnapshot['workers'][number] | null> | null
+  lastDeliberationWorker: OrchestratorDebugSnapshot['workers'][number] | null
 }
 
 type CliRunner = (options: CliRunOptions) => Promise<CliExecResult>
@@ -1072,6 +1077,22 @@ export class MeetingOrchestrator {
 
     session.status = 'running'
 
+    // 前ターンの発話後に開始した議論状態分析をここで合流させる。
+    // この時点までバックグラウンドで走っているため、ユーザーが前の発話を
+    // 読んでいる間に分析が終わっているのが通常で、待ち時間はほぼ発生しない。
+    await this.settlePendingAnalysis(session)
+
+    const settledConvergence = session.convergenceDecision
+    if (
+      settledConvergence &&
+      settledConvergence.readyToConclude &&
+      settledConvergence.confidence >= 70 &&
+      session.messages.length >= 2
+    ) {
+      await this.finalizeSession(session, `収束判定により最終整理を生成しました: ${settledConvergence.reason}`)
+      return this.serializeSession(session)
+    }
+
     const totalTurns = session.turnLimit * Math.max(session.agents.length, 1)
     if (session.currentTurn > totalTurns) {
       await this.finalizeSession(session)
@@ -1091,28 +1112,49 @@ export class MeetingOrchestrator {
       session.debug.dispatchReason = `Autonomous × Meeting は未実装のため Orchestration × Meeting にフォールバックしました。${session.debug.dispatchReason}`
     }
 
+    this.attachSettledDeliberationWorker(session)
+
     if (session.stopRequested) {
       session.status = 'finished'
-      return this.serializeSession(session)
-    }
-
-    const deliberationWorker = await this.updateDeliberationState(session)
-    const convergenceDecision = this.evaluateConvergence(session)
-    session.convergenceDecision = convergenceDecision
-    this.applyTurnAnalysisToDebug(session, deliberationWorker)
-
-    if (convergenceDecision.readyToConclude && convergenceDecision.confidence >= 70 && session.messages.length >= 2) {
-      await this.finalizeSession(session, `収束判定により最終整理を生成しました: ${convergenceDecision.reason}`)
       return this.serializeSession(session)
     }
 
     session.currentTurn += 1
 
     if (session.currentTurn > totalTurns) {
+      // 最終ターンだけは最終整理が最新の議論状態を参照できるよう、分析の完了を待ってから総括する。
+      const deliberationWorker = await this.updateDeliberationState(session)
+      session.convergenceDecision = this.evaluateConvergence(session)
+      this.applyTurnAnalysisToDebug(session, deliberationWorker)
       await this.finalizeSession(session)
+    } else {
+      session.pendingAnalysis = this.updateDeliberationState(session).then(
+        (worker) => worker,
+        () => null
+      )
     }
 
     return this.serializeSession(session)
+  }
+
+  private async settlePendingAnalysis(session: MeetingSession): Promise<void> {
+    if (!session.pendingAnalysis) {
+      return
+    }
+
+    const worker = await session.pendingAnalysis
+    session.pendingAnalysis = null
+    session.lastDeliberationWorker = worker
+    session.convergenceDecision = this.evaluateConvergence(session)
+  }
+
+  private attachSettledDeliberationWorker(session: MeetingSession): void {
+    if (!session.debug || !session.lastDeliberationWorker) {
+      return
+    }
+
+    session.debug.workers = [...session.debug.workers, session.lastDeliberationWorker]
+    session.lastDeliberationWorker = null
   }
 
   private createSession(input: RunTurnRequest, inputContextPrompt: string, inputContextWarnings: string[]): MeetingSession {
@@ -1139,7 +1181,9 @@ export class MeetingOrchestrator {
       convergenceDecision: null,
       debug: null,
       log: [],
-      stopRequested: false
+      stopRequested: false,
+      pendingAnalysis: null,
+      lastDeliberationWorker: null
     }
 
     this.sessions.set(id, session)

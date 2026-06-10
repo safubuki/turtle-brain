@@ -76,7 +76,18 @@ function getNpmCommand(): string {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm'
 }
 
+// npm のグローバルルートはプロセス存続中に変わらないため一度だけ解決する。
+let cachedNpmGlobalBinRoot: string | null | undefined
+
 function getNpmGlobalBinRoot(): string | null {
+  if (cachedNpmGlobalBinRoot === undefined) {
+    cachedNpmGlobalBinRoot = resolveNpmGlobalBinRoot()
+  }
+
+  return cachedNpmGlobalBinRoot
+}
+
+function resolveNpmGlobalBinRoot(): string | null {
   try {
     const rawRoot = execFileSync(getNpmCommand(), ['root', '-g'], {
       encoding: 'utf8',
@@ -95,11 +106,19 @@ function getNpmGlobalBinRoot(): string | null {
   }
 }
 
+// Claude Code のネイティブインストーラ(install.cmd / install.sh)は CLI を
+// ~/.local/bin に配置するが、このディレクトリは PATH に載っていないことがある。
+function getUserLocalBinRoot(): string | null {
+  const home = process.env.USERPROFILE ?? process.env.HOME
+  return home ? path.join(home, '.local', 'bin') : null
+}
+
 function findCommandPath(commandName: string, preferredRoot?: string): string | null {
   const extensions = process.platform === 'win32' ? ['.cmd', '.exe', ''] : ['']
   const roots = dedupeStrings([
     preferredRoot,
     ...getCandidateNpmRoots(),
+    getUserLocalBinRoot(),
     ...(process.env.PATH?.split(path.delimiter) ?? [])
   ])
 
@@ -253,10 +272,19 @@ function runNodeScript(script: string, timeoutMs = 30000): Promise<string> {
 
 function runCommand(command: string, args: string[], timeoutMs = 15000): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
-    })
+    // Windows では .cmd / .bat を shell なしで spawn できない(EINVAL になる)。
+    // shell 経由時の引数は固定文字列のみ(debug models / --version)なので連結で渡す。
+    const useWindowsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)
+    const child = useWindowsShell
+      ? spawn(`"${command}" ${args.join(' ')}`, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+          shell: true
+        })
+      : spawn(command, args, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true
+        })
 
     let stdout = ''
     let stderr = ''
@@ -303,7 +331,7 @@ function createDetectedFallbackCatalog(provider: AgentCliProvider, reason: unkno
     ...createFallbackCatalog(provider, null),
     source: `fallback (${commandPath})`,
     available: true,
-    error: reasonText ? `Model discovery fallback: ${reasonText}` : null
+    error: reasonText || null
   }
 }
 
@@ -389,13 +417,11 @@ function createCodexCatalog(payload: CodexCatalogPayload, source: string): Provi
   }
 }
 
-async function discoverGeminiCatalog(): Promise<ProviderCatalogResponse> {
-  const commandPath = findCommandPath('gemini')
-  if (!commandPath) {
-    throw new Error('Gemini CLI command was not found on PATH or npm global roots.')
-  }
-
-  const modelsFilePath = getCandidateNpmRoots()
+// Gemini CLI からモデル定数を含むソースを探す。
+// 旧バージョンは gemini-cli-core の models.js に、現行バージョンは
+// bundle ディレクトリのチャンク JS に定数が埋め込まれている。
+async function findGeminiModelConstantsSource(): Promise<{ source: string; origin: string } | null> {
+  const nestedModelsPath = getCandidateNpmRoots()
     .map((npmRoot) => path.join(
       npmRoot,
       'node_modules',
@@ -411,7 +437,56 @@ async function discoverGeminiCatalog(): Promise<ProviderCatalogResponse> {
     ))
     .find((candidate) => existsSync(candidate))
 
-  if (!modelsFilePath) {
+  if (nestedModelsPath) {
+    return {
+      source: await fs.readFile(nestedModelsPath, 'utf8'),
+      origin: nestedModelsPath
+    }
+  }
+
+  for (const npmRoot of getCandidateNpmRoots()) {
+    const bundleDir = path.join(npmRoot, 'node_modules', '@google', 'gemini-cli', 'bundle')
+    if (!existsSync(bundleDir)) {
+      continue
+    }
+
+    const entries = await fs.readdir(bundleDir)
+    const candidates = await Promise.all(
+      entries
+        .filter((entry) => entry.endsWith('.js'))
+        .map(async (entry) => {
+          const filePath = path.join(bundleDir, entry)
+          const stat = await fs.stat(filePath)
+          return { filePath, size: stat.size }
+        })
+    )
+
+    // モデル定数はコアロジックの入った大きいチャンクにあるため、サイズ降順で探す。
+    candidates.sort((left, right) => right.size - left.size)
+
+    for (const candidate of candidates) {
+      const content = await fs.readFile(candidate.filePath, 'utf8')
+      if (/\bDEFAULT_GEMINI_MODEL\s*=\s*["']/.test(content)) {
+        return {
+          source: content,
+          origin: candidate.filePath
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+async function discoverGeminiCatalog(): Promise<ProviderCatalogResponse> {
+  const commandPath = findCommandPath('gemini')
+  if (!commandPath) {
+    throw new Error('Gemini CLI command was not found on PATH or npm global roots.')
+  }
+
+  const constantsSource = await findGeminiModelConstantsSource()
+
+  if (!constantsSource) {
     return {
       ...createFallbackCatalog('gemini', null),
       source: `Gemini CLI command (${commandPath})`,
@@ -420,10 +495,12 @@ async function discoverGeminiCatalog(): Promise<ProviderCatalogResponse> {
     }
   }
 
-  const modelsSource = await fs.readFile(modelsFilePath, 'utf8')
+  const { source: modelsSource, origin: modelsFilePath } = constantsSource
 
+  // 旧 models.js の `export const NAME = '...'` と、バンドル内の
+  // `NAME = "..."`(minify 済み)の両方の形式にマッチさせる。
   const modelConstants = Object.fromEntries(
-    Array.from(modelsSource.matchAll(/export const (\w+) = '([^']+)'/g)).map((match) => [match[1], match[2]])
+    Array.from(modelsSource.matchAll(/\b(\w*GEMINI\w*MODEL\w*)\s*=\s*["']([^"']+)["']/g)).map((match) => [match[1], match[2]])
   ) as Record<string, string>
 
   const getDisplayName = (id: string): string => {
@@ -524,7 +601,19 @@ async function discoverCopilotCatalog(): Promise<ProviderCatalogResponse> {
     });
   `
 
-  const raw = await runNodeScript(script, 45000)
+  let raw: string
+  try {
+    raw = await runNodeScript(script, 45000)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (/not authenticated|authentication (?:required|failed)|not (?:logged|signed) in/i.test(detail)) {
+      throw new Error(
+        'Copilot CLI が未ログインのため、モデル一覧は既定の候補のみ表示しています。ターミナルで copilot を起動し /login で GitHub にログインすると、利用可能な全モデルを取得できます。'
+      )
+    }
+    throw error
+  }
+
   const parsed = JSON.parse(raw) as Record<string, unknown>
 
   return {
@@ -559,11 +648,9 @@ async function discoverClaudeCatalog(): Promise<ProviderCatalogResponse> {
   }
 }
 
-export async function getProviderCatalogs(forceRefresh = false): Promise<ProviderCatalogMap> {
-  if (!forceRefresh && cachedCatalogs && Date.now() - cachedCatalogs.fetchedAt < CACHE_TTL_MS) {
-    return cachedCatalogs.catalogs
-  }
+let catalogRefreshPromise: Promise<ProviderCatalogMap> | null = null
 
+async function discoverAllCatalogs(): Promise<ProviderCatalogMap> {
   const [codexResult, geminiResult, copilotResult, claudeResult] = await Promise.allSettled([
     discoverCodexCatalog(),
     discoverGeminiCatalog(),
@@ -584,4 +671,26 @@ export async function getProviderCatalogs(forceRefresh = false): Promise<Provide
   }
 
   return catalogs
+}
+
+export async function getProviderCatalogs(forceRefresh = false): Promise<ProviderCatalogMap> {
+  const cached = cachedCatalogs
+  if (!forceRefresh && cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.catalogs
+  }
+
+  if (!catalogRefreshPromise) {
+    catalogRefreshPromise = discoverAllCatalogs().finally(() => {
+      catalogRefreshPromise = null
+    })
+  }
+
+  // 期限切れでも古いカタログがあれば即返し、再探索はバックグラウンドで進める。
+  // CLI のモデル探索は数秒〜数十秒かかることがあり、会話ターンの途中で
+  // 同期実行するとそのターンだけ大きく待たされるため。
+  if (!forceRefresh && cached) {
+    return cached.catalogs
+  }
+
+  return catalogRefreshPromise
 }
