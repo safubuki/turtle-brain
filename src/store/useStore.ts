@@ -910,13 +910,21 @@ interface BackendHealthResponse {
   }
 }
 
+let copilotBackendVerified = false
+
 async function ensureCopilotBackendReady(agents: AgentProfile[]): Promise<void> {
   if (!agents.some((agent) => agent.provider === 'copilot')) {
     return
   }
 
+  // 一度確認できたバックエンドは再確認しない(毎ターンの余計な往復を避ける)。
+  if (copilotBackendVerified) {
+    return
+  }
+
   const health = await apiRequestJson<BackendHealthResponse>('/api/health')
   if (health.features?.copilotSdkBridge === true && health.featureMarker === REQUIRED_BACKEND_FEATURE_MARKER) {
+    copilotBackendVerified = true
     return
   }
 

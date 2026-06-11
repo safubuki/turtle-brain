@@ -44,6 +44,12 @@ interface ProviderInstallRuntimeStatus {
   npmAvailable: boolean
 }
 
+interface ProviderVersionStatus {
+  installedVersion: string | null
+  latestVersion: string | null
+  updateAvailable: boolean | null
+}
+
 interface SelectionPanelProps {
   title: string
   presets: readonly string[]
@@ -366,6 +372,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [openPanel, setOpenPanel] = useState<{ agentId: string; type: 'stance' | 'personality' } | null>(null)
   const [installSpecs, setInstallSpecs] = useState<Record<AgentProfile['provider'], ProviderInstallSpec> | null>(null)
   const [installRuntime, setInstallRuntime] = useState<ProviderInstallRuntimeStatus | null>(null)
+  const [installVersions, setInstallVersions] = useState<Record<AgentProfile['provider'], ProviderVersionStatus> | null>(null)
   const [installBusyProvider, setInstallBusyProvider] = useState<AgentProfile['provider'] | null>(null)
   const [updateBusyProvider, setUpdateBusyProvider] = useState<AgentProfile['provider'] | null>(null)
   const [installFeedback, setInstallFeedback] = useState<string | null>(null)
@@ -404,11 +411,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           success?: boolean
           providers?: Record<AgentProfile['provider'], ProviderInstallSpec>
           runtime?: ProviderInstallRuntimeStatus
+          versions?: Record<AgentProfile['provider'], ProviderVersionStatus>
         }>('/api/providers/install-info')
 
         if (data.success && data.providers) {
           setInstallSpecs(data.providers)
           setInstallRuntime(data.runtime ?? null)
+          setInstallVersions(data.versions ?? null)
         }
       } catch (error) {
         console.error('Failed to load provider install info:', error)
@@ -652,6 +661,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 const spec = installSpecs?.[provider] ?? null
                 const requiresNodeSetup = providerRequiresNodeSetup(provider)
                 const isProviderOperationBusy = installBusyProvider !== null || updateBusyProvider !== null
+                const versionStatus = installVersions?.[provider] ?? null
+                const updateAvailable = versionStatus?.updateAvailable ?? null
+                const updateButtonClass = updateAvailable === true
+                  ? 'rounded-xl border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-200 transition-colors hover:border-amber-300 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50'
+                  : updateAvailable === false
+                    ? 'rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-3 py-2 text-sm font-medium text-emerald-200 transition-colors hover:border-emerald-300 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50'
+                    : 'rounded-xl border border-slate-500/40 bg-slate-600/10 px-3 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-slate-400 hover:bg-slate-600/20 disabled:cursor-not-allowed disabled:opacity-50'
+                const updateButtonLabel = updateAvailable === true
+                  ? `CLI を更新 (v${versionStatus?.latestVersion ?? '?'})`
+                  : updateAvailable === false
+                    ? `最新版です (v${versionStatus?.installedVersion ?? '?'})`
+                    : 'CLI を更新'
 
                 return (
                   <div key={provider} className="rounded-2xl border border-slate-700/60 bg-slate-900/35 p-4">
@@ -680,14 +701,21 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     {spec && (
                       <div className="mt-3 space-y-2">
                         {isAvailable ? (
-                          <button
-                            type="button"
-                            onClick={() => void handleUpdateProvider(provider)}
-                            disabled={isProviderOperationBusy || requiresNodeSetup}
-                            className="rounded-xl border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-200 transition-colors hover:border-amber-300 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {updateBusyProvider === provider ? '更新中...' : requiresNodeSetup ? 'Node.js が必要' : 'CLI を更新'}
-                          </button>
+                          <>
+                            {versionStatus && (versionStatus.installedVersion || versionStatus.latestVersion) && (
+                              <p className="text-[11px] leading-4 text-slate-500">
+                                {`導入: ${versionStatus.installedVersion ? `v${versionStatus.installedVersion}` : '不明'} / 最新: ${versionStatus.latestVersion ? `v${versionStatus.latestVersion}` : '不明'}`}
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => void handleUpdateProvider(provider)}
+                              disabled={isProviderOperationBusy || requiresNodeSetup}
+                              className={updateButtonClass}
+                            >
+                              {updateBusyProvider === provider ? '更新中...' : requiresNodeSetup ? 'Node.js が必要' : updateButtonLabel}
+                            </button>
+                          </>
                         ) : (
                           <button
                             type="button"

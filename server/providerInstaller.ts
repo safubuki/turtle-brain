@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
+import https from 'https'
 import path from 'path'
 import type { AgentCliProvider } from './cliRunner'
 
@@ -17,6 +18,15 @@ export interface ProviderInstallRuntimeStatus {
   npmVersion: string | null
   npmAvailable: boolean
 }
+
+export interface ProviderVersionStatus {
+  installedVersion: string | null
+  latestVersion: string | null
+  // null = 判定不能(未インストール、またはレジストリへ到達できない場合)
+  updateAvailable: boolean | null
+}
+
+export type ProviderVersionStatusMap = Record<AgentCliProvider, ProviderVersionStatus>
 
 function dedupeStrings(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))]
@@ -125,6 +135,154 @@ async function runCommand(command: string, args: string[]): Promise<string> {
       resolve(stdout.trim() || stderr.trim())
     })
   })
+}
+
+const NPM_PACKAGE_BY_PROVIDER: Record<AgentCliProvider, string> = {
+  codex: '@openai/codex',
+  gemini: '@google/gemini-cli',
+  copilot: '@github/copilot',
+  // Claude Code はネイティブインストーラ配布だが、バージョンは npm パッケージと同期している。
+  claude: '@anthropic-ai/claude-code'
+}
+
+const VERSION_CACHE_TTL_MS = 10 * 60 * 1000
+let cachedVersionStatuses: { fetchedAt: number; versions: ProviderVersionStatusMap } | null = null
+
+export function clearProviderVersionCache(): void {
+  cachedVersionStatuses = null
+}
+
+function readInstalledNpmVersion(packageName: string): string | null {
+  for (const root of getCandidateNpmRoots()) {
+    const packageJsonPath = path.join(root, 'node_modules', ...packageName.split('/'), 'package.json')
+    if (!existsSync(packageJsonPath)) {
+      continue
+    }
+
+    try {
+      const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version?: unknown }
+      if (typeof parsed.version === 'string' && parsed.version.trim()) {
+        return parsed.version.trim()
+      }
+    } catch {
+      // 壊れた package.json は無視して次の候補を見る。
+    }
+  }
+
+  return null
+}
+
+async function getClaudeInstalledVersion(): Promise<string | null> {
+  const npmVersion = readInstalledNpmVersion(NPM_PACKAGE_BY_PROVIDER.claude)
+  if (npmVersion) {
+    return npmVersion
+  }
+
+  const home = process.env.USERPROFILE ?? process.env.HOME
+  const candidates = [
+    home ? path.join(home, '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude') : null,
+    'claude'
+  ].filter((candidate): candidate is string => Boolean(candidate))
+
+  for (const candidate of candidates) {
+    if (candidate !== 'claude' && !existsSync(candidate)) {
+      continue
+    }
+
+    try {
+      const output = await runCommand(candidate, ['--version'])
+      const match = output.match(/\d+\.\d+\.\d+/)
+      if (match) {
+        return match[0]
+      }
+    } catch {
+      // 次の候補へ。
+    }
+  }
+
+  return null
+}
+
+function fetchLatestNpmVersion(packageName: string, timeoutMs = 8000): Promise<string | null> {
+  const url = `https://registry.npmjs.org/${packageName.replace('/', '%2F')}/latest`
+
+  return new Promise((resolve) => {
+    const request = https.get(url, { timeout: timeoutMs }, (response) => {
+      if (response.statusCode !== 200) {
+        response.resume()
+        resolve(null)
+        return
+      }
+
+      let data = ''
+      response.on('data', (chunk: Buffer) => {
+        data += chunk.toString()
+      })
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(data) as { version?: unknown }
+          resolve(typeof parsed.version === 'string' ? parsed.version : null)
+        } catch {
+          resolve(null)
+        }
+      })
+    })
+
+    request.on('timeout', () => request.destroy())
+    request.on('error', () => resolve(null))
+  })
+}
+
+function isVersionNewer(latest: string, installed: string): boolean {
+  const parse = (value: string): number[] =>
+    value.split(/[.+-]/, 3).map((part) => Number.parseInt(part, 10) || 0)
+
+  const [latestMajor, latestMinor, latestPatch] = parse(latest)
+  const [installedMajor, installedMinor, installedPatch] = parse(installed)
+
+  if (latestMajor !== installedMajor) {
+    return latestMajor > installedMajor
+  }
+  if (latestMinor !== installedMinor) {
+    return latestMinor > installedMinor
+  }
+  return latestPatch > installedPatch
+}
+
+async function getProviderVersionStatus(provider: AgentCliProvider): Promise<ProviderVersionStatus> {
+  const [installedVersion, latestVersion] = await Promise.all([
+    provider === 'claude'
+      ? getClaudeInstalledVersion()
+      : Promise.resolve(readInstalledNpmVersion(NPM_PACKAGE_BY_PROVIDER[provider])),
+    fetchLatestNpmVersion(NPM_PACKAGE_BY_PROVIDER[provider])
+  ])
+
+  return {
+    installedVersion,
+    latestVersion,
+    updateAvailable:
+      installedVersion && latestVersion ? isVersionNewer(latestVersion, installedVersion) : null
+  }
+}
+
+export async function getProviderVersionStatuses(forceRefresh = false): Promise<ProviderVersionStatusMap> {
+  if (!forceRefresh && cachedVersionStatuses && Date.now() - cachedVersionStatuses.fetchedAt < VERSION_CACHE_TTL_MS) {
+    return cachedVersionStatuses.versions
+  }
+
+  const providers: AgentCliProvider[] = ['codex', 'gemini', 'copilot', 'claude']
+  const statuses = await Promise.all(providers.map((provider) => getProviderVersionStatus(provider)))
+
+  const versions = Object.fromEntries(
+    providers.map((provider, index) => [provider, statuses[index]])
+  ) as ProviderVersionStatusMap
+
+  cachedVersionStatuses = {
+    fetchedAt: Date.now(),
+    versions
+  }
+
+  return versions
 }
 
 export async function getProviderInstallRuntimeStatus(): Promise<ProviderInstallRuntimeStatus> {

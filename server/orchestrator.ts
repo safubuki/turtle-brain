@@ -272,6 +272,12 @@ interface MeetingSession {
   // 分析プロンプトの入力(発話ログ)は従来の直列実行と完全に同一。
   pendingAnalysis: Promise<OrchestratorDebugSnapshot['workers'][number] | null> | null
   lastDeliberationWorker: OrchestratorDebugSnapshot['workers'][number] | null
+  // Meeting モードの進行判断(モデレーション)も同様にバックグラウンドで先行実行する。
+  // 入力(発話ログ・議論状態・発言回数)は次ターン冒頭で実行した場合と完全に同一。
+  pendingModeration: Promise<{
+    decision: FacilitatorDecision
+    worker: OrchestratorDebugSnapshot['workers'][number]
+  } | null> | null
 }
 
 type CliRunner = (options: CliRunOptions) => Promise<CliExecResult>
@@ -501,6 +507,35 @@ const VIEWPOINT_ROLE_LABELS: Record<AgentViewpointRoleId, string> = {
   'security-risk': 'セキュリティ・リスク管理'
 }
 
+// 各視点ロールが「持ち場」とする関心事と、そのロールらしい発言の型。
+// ロールの色が薄い一般論にならないよう、発話プロンプトに毎回注入する。
+const VIEWPOINT_ROLE_GUIDANCE: Record<AgentViewpointRoleId, string> = {
+  'executive-business':
+    'Own concerns: business value, return on investment, strategic fit, prioritization, and go/no-go decisions. Typical moves: ask who pays and why, what gets deprioritized to make room, and whether the upside justifies the cost. You do not interrogate implementation details — you judge whether the business case stands.',
+  operations:
+    'Own concerns: day-to-day operability, workload, procedures, handover, and what breaks in real operation. Typical moves: point out the operational burden a proposal creates, ask who runs it every day, and demand realistic procedures and fallback steps before agreeing.',
+  'project-management':
+    'Own concerns: scope, schedule, dependencies, resources, risk management, and definition of done. Typical moves: ask what the milestones and owners are, surface blocking dependencies, and convert vague ideas into a concrete, achievable plan.',
+  'customer-user':
+    "Own concerns: user value, ease of use, real usage scenarios, adoption barriers, and trust. Typical moves: speak from the user's seat — would you actually use this, and where would you stumble? Challenge anything that benefits the provider but not the user.",
+  'sales-market':
+    'Own concerns: market demand, competitors, pricing, positioning, and what makes the offering sellable. Typical moves: ask how this wins against alternatives, who the buyer is, and whether the story is compelling enough to pitch tomorrow.',
+  'technical-practice':
+    'Own concerns: implementation approach, technical feasibility, architecture trade-offs, effort, and maintainability. Typical moves: propose a concrete first implementation step, name the hard technical part, and flag hidden complexity or technical debt.',
+  'quality-qms':
+    'Own concerns: quality criteria, test strategy, regression risk, standards conformance, and process discipline. Typical moves: ask how success will be verified, propose acceptance criteria, and flag claims that have not been validated.',
+  'research-development':
+    'Own concerns: novelty, hypotheses, experiments, evidence, and technical uncertainty. Typical moves: reframe open questions as testable hypotheses and propose a small experiment before any large commitment.',
+  'finance-accounting':
+    'Own concerns: cost structure, budget, cash flow, unit economics, and financial risk. Typical moves: ask what it costs, when it pays back, and which optimistic number the plan secretly depends on.',
+  'people-organization':
+    'Own concerns: staffing, skills, motivation, team structure, and change management. Typical moves: ask who will actually do the work, whether the team can absorb it, and how the change will land with the people affected.',
+  'legal-compliance-ip':
+    'Own concerns: legal risk, contracts, licensing, regulatory compliance, and intellectual property. Typical moves: flag legal or contractual blockers early, and state plainly what must be checked or cleared before anyone commits.',
+  'security-risk':
+    'Own concerns: threats, vulnerabilities, data protection, incident impact, and risk mitigation. Typical moves: ask what could go wrong, what data is exposed and to whom, and which mitigations are non-negotiable before launch.'
+}
+
 function normalizeViewpointRoleId(value: unknown): AgentViewpointRoleId | null {
   return typeof value === 'string' && value in VIEWPOINT_ROLE_LABELS
     ? value as AgentViewpointRoleId
@@ -540,6 +575,7 @@ function formatAgentPerspectiveForPrompt(
 ): string {
   const lines = [
     `Viewpoint role: ${getAgentViewpointLabel(agent)}`,
+    agent.viewpointRoleId ? `Role concerns and typical moves: ${VIEWPOINT_ROLE_GUIDANCE[agent.viewpointRoleId]}` : '',
     agent.viewpointFocus ? `Primary viewpoint focus: ${agent.viewpointFocus}` : '',
     agent.viewpointAvoid ? `Avoid leaning too heavily on: ${agent.viewpointAvoid}` : ''
   ].filter(Boolean)
@@ -552,7 +588,9 @@ function formatAgentPerspectiveForPrompt(
 // 各エージェントが自分の役割の関心事を主役にして話すよう促す。
 function buildRoleAltitudeInstruction(agent: Pick<AgentProfileInput, 'viewpointRoleId'>): string {
   return [
-    `Stay at the altitude of your viewpoint role (${getAgentViewpointLabel(agent)}). Lead with the concerns, value judgments, and questions that this role owns, using your "Primary viewpoint focus" above.`,
+    `Stay at the altitude of your viewpoint role (${getAgentViewpointLabel(agent)}) and speak unmistakably as that role: open from the concerns this role owns, not from a neutral observer position.`,
+    'Every reply must contain at least one role-specific contribution — a question, risk, criterion, or proposal that only your role would raise, grounded in the "Role concerns and typical moves" above.',
+    'If a draft reply could plausibly have come from any other role, it is too generic — rewrite it from your own seat before answering.',
     'For a business or management role, lead with value, who would pay, cost and return on investment, market fit, and priority — rather than interrogating fine implementation details.',
     "When you react to another participant, engage from your own role's concerns instead of diving into the technical or operational detail that belongs to their role."
   ].join(' ')
@@ -893,7 +931,9 @@ function getVisibleParticipantState(session: MeetingSession, agent: RuntimeAgent
     ? buildPromptExcerpt(latestMessage.content, excerptChars)
     : 'No visible statement yet.'
 
-  return `${agent.name}: viewpoint=${getAgentViewpointLabel(agent)}, speakCount=${agent.speakCount}, handRaise=${agent.handRaiseIntensity}, latest="${latestSummary}"`
+  // agentId を明示しないとファシリテータが selectedAgentIds や participantScores に
+  // 有効な ID を返せず、話者選択とスコアがすべてフォールバックになってしまう。
+  return `agentId=${agent.id} / name=${agent.name}: viewpoint=${getAgentViewpointLabel(agent)}, speakCount=${agent.speakCount}, handRaise=${agent.handRaiseIntensity}, latest="${latestSummary}"`
 }
 
 function getMessagesSinceLastFacilitator(session: MeetingSession, facilitatorId: string): number {
@@ -1121,20 +1161,69 @@ export class MeetingOrchestrator {
 
     session.currentTurn += 1
 
-    if (session.currentTurn > totalTurns) {
-      // 最終ターンだけは最終整理が最新の議論状態を参照できるよう、分析の完了を待ってから総括する。
-      const deliberationWorker = await this.updateDeliberationState(session)
-      session.convergenceDecision = this.evaluateConvergence(session)
-      this.applyTurnAnalysisToDebug(session, deliberationWorker)
-      await this.finalizeSession(session)
-    } else {
-      session.pendingAnalysis = this.updateDeliberationState(session).then(
-        (worker) => worker,
-        () => null
-      )
-    }
+    // 分析は常にバックグラウンドで実行し、発話を即座に返す。ターン上限に達した場合も
+    // 次のリクエスト冒頭で分析を合流させてから最終整理するため(冒頭の totalTurns 判定)、
+    // 最終整理が参照する議論状態は従来の直列実行と完全に同一になる。
+    session.pendingAnalysis = this.updateDeliberationState(session).then(
+      (worker) => worker,
+      () => null
+    )
+    this.queueMeetingModerationPrefetch(session)
 
     return this.serializeSession(session)
+  }
+
+  // Meeting モードの進行判断(モデレーション)を、ユーザーが発話を読んでいる間に
+  // バックグラウンドで先行実行する。議論状態分析の完了後に連鎖させることで、
+  // 次ターン冒頭で直列実行した場合とプロンプト入力が完全に一致する。
+  private queueMeetingModerationPrefetch(session: MeetingSession): void {
+    session.pendingModeration = null
+
+    if (session.discussionStyle !== 'meeting' || session.handRaiseMode !== 'ai-evaluation') {
+      return
+    }
+
+    // ターン上限に達している場合、次のリクエストは最終整理になるため進行判断は不要。
+    const totalTurns = session.turnLimit * Math.max(session.agents.length, 1)
+    if (session.currentTurn > totalTurns) {
+      return
+    }
+
+    const facilitator = session.agents.find((agent) => agent.role === 'Facilitator')
+    if (!facilitator) {
+      return
+    }
+
+    const analysis = session.pendingAnalysis ?? Promise.resolve(null)
+    session.pendingModeration = analysis
+      .then(async () => {
+        if (session.stopRequested) {
+          return null
+        }
+
+        // 収束済みなら次ターンは最終整理になるため、進行判断は実行しない。
+        const convergence = this.evaluateConvergence(session)
+        if (convergence.readyToConclude && convergence.confidence >= 70 && session.messages.length >= 2) {
+          return null
+        }
+
+        const startedAt = Date.now()
+        const decision = await this.moderateMeetingV2(session, facilitator)
+        const finishedAt = Date.now()
+
+        return {
+          decision,
+          worker: {
+            workerId: `moderation:${facilitator.id}`,
+            kind: 'moderation' as const,
+            targetAgentId: facilitator.id,
+            startedAt,
+            finishedAt,
+            durationMs: finishedAt - startedAt
+          }
+        }
+      })
+      .catch(() => null)
   }
 
   private async settlePendingAnalysis(session: MeetingSession): Promise<void> {
@@ -1183,7 +1272,8 @@ export class MeetingOrchestrator {
       log: [],
       stopRequested: false,
       pendingAnalysis: null,
-      lastDeliberationWorker: null
+      lastDeliberationWorker: null,
+      pendingModeration: null
     }
 
     this.sessions.set(id, session)
@@ -1477,27 +1567,42 @@ export class MeetingOrchestrator {
     let scores: ScoreDecision[] = []
 
     if (useAiEvaluation && facilitator) {
-      const startedAt = Date.now()
-      facilitatorDecision = await this.moderateMeetingV2(session, facilitator)
-      const finishedAt = Date.now()
-      workerRuns.push({
-        workerId: `moderation:${facilitator.id}`,
-        kind: 'moderation',
-        targetAgentId: facilitator.id,
-        startedAt,
-        finishedAt,
-        durationMs: finishedAt - startedAt
-      })
+      // 前ターンの発話後にバックグラウンドで先行実行した進行判断があればそれを使う。
+      const prefetched = session.pendingModeration ? await session.pendingModeration : null
+      session.pendingModeration = null
+
+      if (prefetched) {
+        facilitatorDecision = prefetched.decision
+        workerRuns.push(prefetched.worker)
+      } else {
+        const startedAt = Date.now()
+        facilitatorDecision = await this.moderateMeetingV2(session, facilitator)
+        const finishedAt = Date.now()
+        workerRuns.push({
+          workerId: `moderation:${facilitator.id}`,
+          kind: 'moderation',
+          targetAgentId: facilitator.id,
+          startedAt,
+          finishedAt,
+          durationMs: finishedAt - startedAt
+        })
+      }
 
       scores = participants.map((agent) => {
         const matched = facilitatorDecision?.participantScores.find((entry) => entry.agentId === agent.id)
+        if (!matched) {
+          // ファシリテータがスコアを返さなかった参加者は、固定値ではなく
+          // ルールベース採点(言及・受信メモ・発言均等性など)で差をつける。
+          return this.scoreParticipantRuleBased(session, agent)
+        }
+
         return {
           agentId: agent.id,
           runtimeSessionId: agent.runtimeSessionId,
-          score: clamp(matched?.score ?? 40, 0, 100),
-          confidence: clamp(matched?.confidence ?? 50, 0, 100),
-          desiredAction: matched?.desiredAction ?? 'question',
-          reason: matched?.reason ?? 'Fallback score because the facilitator did not return a participant score.'
+          score: clamp(matched.score, 0, 100),
+          confidence: clamp(matched.confidence, 0, 100),
+          desiredAction: matched.desiredAction,
+          reason: matched.reason
         }
       })
     } else {
@@ -1756,6 +1861,7 @@ export class MeetingOrchestrator {
       getSafeSharedPromptContext(session),
       `You are ${agent.name}. Your stance is "${agent.stance}". Your personality is "${agent.personality}".`,
       formatAgentPerspectiveForPrompt(agent),
+      buildRoleAltitudeInstruction(agent),
       getSafeReasoningGuidance(agent.reasoningEffort),
       `Deliberation state:\n${formatDeliberationStateForPrompt(session.deliberationState)}`,
       lastOtherMessage ? `Most recent message from another agent:\n${lastOtherMessage}` : '',
@@ -1906,21 +2012,6 @@ export class MeetingOrchestrator {
         : state.convergence.reason || '未解決論点または根拠不足が残っています。',
       remainingIssues,
       nextFocus: state.convergence.recommendedNextFocus
-    }
-  }
-
-  private applyTurnAnalysisToDebug(
-    session: MeetingSession,
-    deliberationWorker: OrchestratorDebugSnapshot['workers'][number] | null
-  ): void {
-    if (!session.debug) {
-      return
-    }
-
-    session.debug.deliberationState = session.deliberationState
-    session.debug.convergenceDecision = session.convergenceDecision
-    if (deliberationWorker) {
-      session.debug.workers = [...session.debug.workers, deliberationWorker]
     }
   }
 
@@ -2216,6 +2307,25 @@ export class MeetingOrchestrator {
     }
   }
 
+  // ファシリテータが返す参加者参照(agentId・表示名・名前を含む文字列)を参加者に解決する。
+  private resolveParticipantReference(participants: RuntimeAgent[], reference: unknown): RuntimeAgent | null {
+    if (typeof reference !== 'string') {
+      return null
+    }
+
+    const token = reference.trim()
+    if (!token) {
+      return null
+    }
+
+    return (
+      participants.find((agent) => agent.id === token) ??
+      participants.find((agent) => agent.name === token) ??
+      participants.find((agent) => token.includes(agent.name)) ??
+      null
+    )
+  }
+
   private async moderateMeetingV2(session: MeetingSession, facilitator: RuntimeAgent): Promise<FacilitatorDecision> {
     const transcript = getSafeRecentDialogue(session, 8, 180)
     const participants = session.agents.filter((agent) => agent.role === 'Participant')
@@ -2244,8 +2354,10 @@ export class MeetingOrchestrator {
       'Prioritize unresolved issues, evidence gaps, and concrete disagreement over simple turn fairness.',
       'After several participant messages, it is good to briefly summarize direction and then hand off to one or two participants.',
       'Do not infer hidden roles, departments, stance labels, or personality labels of participants. Refer only to agent names and what they have actually said.',
+      'If your own latest facilitation message in the dialogue explicitly invited specific participants by name, select those participants next in the stated order, unless the discussion has clearly moved past that invitation.',
       'Decide who should speak next and whether multiple participants should respond in parallel.',
-      'Also score every participant for hand-raise intensity.',
+      'Also score every participant for hand-raise intensity. Differentiate the scores to reflect how urgently each participant should speak right now — do not give everyone the same score.',
+      'Use the exact agentId values shown in "Participant state" for selectedAgentId, selectedAgentIds, inviteAgentIds, and participantScores. Never invent ids and never use display names in id fields.',
       'Return JSON only.',
       '{"overview":"current state","rationale":"why","nextFocus":"next focus","selectedAgentId":"agent-id or null","selectedAgentIds":["agent-id"],"inviteAgentIds":["agent-id"],"interventionPriority":0-100,"shouldIntervene":true|false,"parallelDispatch":true|false,"unresolvedIssues":["issue"],"evidenceGaps":["gap"],"readyToConclude":true|false,"recommendedNextFocus":"focus or null","participantScores":[{"agentId":"agent-id","score":0-100,"confidence":0-100,"desiredAction":"respond|question|critique|verify|synthesize|conclude|wait","reason":"short reason"}]}'
     ].join('\n\n')
@@ -2253,26 +2365,47 @@ export class MeetingOrchestrator {
     const result = await this.runMetaCli(facilitator.provider, facilitator.model, facilitator.reasoningEffort, prompt)
 
     const parsed = extractJson<Partial<FacilitatorDecision>>(result.response)
-    const selectedAgentIds = Array.isArray(parsed?.selectedAgentIds) ? parsed.selectedAgentIds.filter(Boolean) : []
-    const inviteAgentIds = Array.isArray(parsed?.inviteAgentIds) ? parsed.inviteAgentIds.filter(Boolean) : []
+
+    // ファシリテータが ID の代わりに表示名や曖昧な値を返しても話者選択・スコアが
+    // 機能するよう、参加者の正規 ID に解決する。解決できないものは捨てる。
+    const resolveParticipantId = (value: unknown): string | null =>
+      this.resolveParticipantReference(participants, value)?.id ?? null
+
+    const selectedAgentIds = [...new Set(
+      (Array.isArray(parsed?.selectedAgentIds) ? parsed.selectedAgentIds : [])
+        .map(resolveParticipantId)
+        .filter((id): id is string => Boolean(id))
+    )]
+    const inviteAgentIds = [...new Set(
+      (Array.isArray(parsed?.inviteAgentIds) ? parsed.inviteAgentIds : [])
+        .map(resolveParticipantId)
+        .filter((id): id is string => Boolean(id))
+    )]
+    const seenScoreIds = new Set<string>()
     const participantScores = Array.isArray(parsed?.participantScores)
       ? parsed.participantScores
           .filter((entry): entry is FacilitatorDecision['participantScores'][number] => Boolean(entry && typeof entry === 'object'))
           .map((entry) => ({
-            agentId: typeof entry.agentId === 'string' ? entry.agentId : '',
+            agentId: resolveParticipantId(entry.agentId) ?? '',
             score: clamp(typeof entry.score === 'number' ? entry.score : 40, 0, 100),
             confidence: clamp(typeof entry.confidence === 'number' ? entry.confidence : 50, 0, 100),
             desiredAction: normalizeDesiredAction(entry.desiredAction, 'question'),
             reason: typeof entry.reason === 'string' ? entry.reason : 'Fallback score because the facilitator did not return a reason.'
           }))
-          .filter((entry) => entry.agentId.length > 0)
+          .filter((entry) => {
+            if (!entry.agentId || seenScoreIds.has(entry.agentId)) {
+              return false
+            }
+            seenScoreIds.add(entry.agentId)
+            return true
+          })
       : []
 
     return {
       overview: parsed?.overview ?? 'Current state was not clearly returned.',
       rationale: parsed?.rationale ?? 'No explicit rationale was returned.',
       nextFocus: parsed?.nextFocus ?? 'Ask the next agent to move the discussion forward.',
-      selectedAgentId: parsed?.selectedAgentId ?? null,
+      selectedAgentId: resolveParticipantId(parsed?.selectedAgentId),
       selectedAgentIds,
       inviteAgentIds,
       interventionPriority: clamp(parsed?.interventionPriority ?? 40, 0, 100),
@@ -2414,6 +2547,18 @@ export class MeetingOrchestrator {
         }
       })
       .sort((left, right) => right.adjustedScore - left.adjustedScore)
+
+    // 一度も発言していない参加者が残りターン数以上いる場合、このまま進めると
+    // 発言ゼロのまま会議が終わるため、未発言者を優先して必ず機会を与える。
+    const silentRanked = ranked.filter((entry) => entry.agent.speakCount === 0)
+    const totalTurns = session.turnLimit * Math.max(session.agents.length, 1)
+    const remainingTurns = Math.max(totalTurns - session.currentTurn + 1, 0)
+    if (silentRanked.length > 0 && silentRanked.length >= remainingTurns) {
+      return {
+        speakers: [silentRanked[0].agent],
+        dispatchReason: `残りターンが少ないため、未発言の ${silentRanked[0].agent.name} に発言機会を割り当てました。`
+      }
+    }
 
     const topParticipantScore = ranked[0]?.adjustedScore ?? 0
     const messagesSinceLastFacilitator =

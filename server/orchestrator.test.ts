@@ -127,6 +127,13 @@ test('収束時に構造化された最終整理を返す', async () => {
   const orchestrator = new MeetingOrchestrator(createFakeRunner())
   const firstTurn = await orchestrator.runTurn(createBaseRequest())
 
+  // 発話は即座に返り、議論分析は次リクエストに繰り延べられる。
+  const secondTurn = await orchestrator.runTurn(createBaseRequest({
+    sessionId: firstTurn.sessionId
+  }))
+  assert.equal(secondTurn.sessionStatus, 'running')
+
+  // 次のリクエストで収束判定が成立し、最終整理が生成される。
   const finalTurn = await orchestrator.runTurn(createBaseRequest({
     sessionId: firstTurn.sessionId
   }))
@@ -153,6 +160,91 @@ test('議論状態分析はバックグラウンド実行され、次ターン�
   // 前ターンの分析結果(議論状態と worker 実行記録)は次ターンに反映される。
   assert.equal(secondTurn.debug?.workers.some((worker) => worker.kind === 'deliberation'), true)
   assert.equal(secondTurn.debug?.deliberationState?.convergence.status, 'ready_to_conclude')
+})
+
+function createMeetingFakeRunner(): (options: CliRunOptions) => Promise<CliExecResult> {
+  return async ({ prompt }) => {
+    if (prompt.includes('Update the deliberation state')) {
+      return {
+        response: JSON.stringify({
+          agenda: ['優先順位'],
+          claims: [],
+          openIssues: ['比較基準が未定義'],
+          disagreements: [],
+          evidenceGaps: [],
+          consensus: { level: 20, summary: 'まだ序盤' },
+          convergence: { status: 'exploring', reason: '議論継続中', confidence: 10, recommendedNextFocus: '基準の定義' }
+        }),
+        sessionId: 'meta-session',
+        rateLimits: null
+      }
+    }
+
+    if (prompt.includes('hand-raise intensity')) {
+      // ファシリテータが ID 欄に表示名を返してしまうケースを再現する。
+      return {
+        response: JSON.stringify({
+          overview: '基準の整理が必要',
+          rationale: 'エージェントBが具体案を持っている',
+          nextFocus: '比較基準の素案を出す',
+          selectedAgentId: null,
+          selectedAgentIds: ['エージェントB'],
+          inviteAgentIds: [],
+          interventionPriority: 10,
+          shouldIntervene: false,
+          parallelDispatch: false,
+          unresolvedIssues: [],
+          evidenceGaps: [],
+          readyToConclude: false,
+          recommendedNextFocus: null,
+          participantScores: [
+            { agentId: 'エージェントA', score: 35, confidence: 80, desiredAction: 'wait', reason: '様子見' },
+            { agentId: 'エージェントB', score: 88, confidence: 90, desiredAction: 'respond', reason: '次の具体案を出す' }
+          ]
+        }),
+        sessionId: 'moderation-session',
+        rateLimits: null
+      }
+    }
+
+    return {
+      response: '比較基準として価値と実装リスクの2軸を提案します。',
+      sessionId: 'speech-session',
+      rateLimits: null
+    }
+  }
+}
+
+test('Meeting モードはファシリテータの名前参照を解決し、挙手強度とプリフェッチ進行判断を反映する', async () => {
+  const facilitator: AgentProfileInput = {
+    ...createAgent('agent-3', 'ファシリテータ'),
+    role: 'Facilitator',
+    viewpointRoleId: 'project-management'
+  }
+  const request = createBaseRequest({
+    discussionStyle: 'meeting',
+    handRaiseMode: 'ai-evaluation',
+    turnLimit: 2,
+    agents: [createAgent('agent-1', 'エージェントA'), createAgent('agent-2', 'エージェントB'), facilitator]
+  })
+
+  const orchestrator = new MeetingOrchestrator(createMeetingFakeRunner())
+
+  // 1ターン目: 会議開始のためファシリテータが論点整理を行う。
+  const firstTurn = await orchestrator.runTurn(request)
+  assert.equal(firstTurn.debug?.selectedSpeakerId, 'agent-3')
+
+  // 2ターン目: 先行実行済みの進行判断が使われ、名前参照「エージェントB」が agent-2 に解決される。
+  const secondTurn = await orchestrator.runTurn({ ...request, sessionId: firstTurn.sessionId })
+
+  assert.equal(secondTurn.debug?.selectedSpeakerId, 'agent-2')
+  assert.equal(secondTurn.debug?.workers.some((worker) => worker.kind === 'moderation'), true)
+
+  // 挙手強度はファシリテータの採点を反映して参加者ごとに異なる。
+  const agentA = secondTurn.agents.find((agent) => agent.id === 'agent-1')
+  const agentB = secondTurn.agents.find((agent) => agent.id === 'agent-2')
+  assert.equal(agentA?.handRaiseIntensity, 35)
+  assert.equal(agentB?.handRaiseIntensity, 88)
 })
 
 test('Autonomous Conversation は action を集約して発話を採用する', async () => {

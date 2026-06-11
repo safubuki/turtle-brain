@@ -6,7 +6,14 @@ import { loadInputContext } from './contextLoader'
 import { pickFilesDialog, pickFolderDialog } from './nativeDialog'
 import { MeetingOrchestrator, type RunTurnRequest } from './orchestrator'
 import { clearProviderCatalogCache, getProviderCatalogs } from './providerCatalog'
-import { getProviderInstallRuntimeStatus, getProviderInstallSpec, installProviderCli, updateProviderCli } from './providerInstaller'
+import {
+  clearProviderVersionCache,
+  getProviderInstallRuntimeStatus,
+  getProviderInstallSpec,
+  getProviderVersionStatuses,
+  installProviderCli,
+  updateProviderCli
+} from './providerInstaller'
 
 dotenv.config()
 
@@ -57,7 +64,10 @@ app.get('/api/providers/catalogs', async (req, res) => {
 
 app.get('/api/providers/install-info', async (_req, res) => {
   try {
-    const runtime = await getProviderInstallRuntimeStatus()
+    const [runtime, versions] = await Promise.all([
+      getProviderInstallRuntimeStatus(),
+      getProviderVersionStatuses()
+    ])
     res.json({
       success: true,
       providers: {
@@ -66,7 +76,8 @@ app.get('/api/providers/install-info', async (_req, res) => {
         copilot: getProviderInstallSpec('copilot'),
         claude: getProviderInstallSpec('claude')
       },
-      runtime
+      runtime,
+      versions
     })
   } catch (error) {
     console.error('[API] Error while loading provider install info:', error)
@@ -92,6 +103,7 @@ app.post('/api/providers/install', async (req, res) => {
 
     const result = await installProviderCli(provider)
     clearProviderCatalogCache()
+    clearProviderVersionCache()
     res.json({
       success: true,
       provider,
@@ -124,6 +136,7 @@ app.post('/api/providers/update', async (req, res) => {
 
     const result = await updateProviderCli(provider)
     clearProviderCatalogCache()
+    clearProviderVersionCache()
     res.json({
       success: true,
       provider,
@@ -259,8 +272,11 @@ app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`)
 })
 
-// モデルカタログを起動直後にバックグラウンドで温めておき、
-// 最初の会話ターンが CLI のモデル探索(数秒〜数十秒)を待たされないようにする。
+// モデルカタログとバージョン情報を起動直後にバックグラウンドで温めておき、
+// 最初の会話ターンや設定画面の初回オープンが探索・レジストリ照会を待たされないようにする。
 void getProviderCatalogs().catch((error) => {
   console.error('[Startup] Provider catalog prewarm failed:', error)
+})
+void getProviderVersionStatuses().catch((error) => {
+  console.error('[Startup] Provider version prewarm failed:', error)
 })
